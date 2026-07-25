@@ -7,7 +7,7 @@ import {
 	useComposerRuntime,
 	useAuiState,
 } from "@assistant-ui/react";
-import { ThinkingOrb } from "thinking-orbs";
+import { OrbLoader as ThinkingOrb } from "./OrbLoader";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
 	Brain,
@@ -35,7 +35,7 @@ import {
 	Unplug,
 	X,
 } from "lucide-react";
-import { ThinkingOrb } from "thinking-orbs";
+import { OrbLoader as ThinkingOrb } from "./OrbLoader";
 import {
 	createContext,
 	useContext,

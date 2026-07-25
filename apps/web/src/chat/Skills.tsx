@@ -1,4 +1,4 @@
-import { ThinkingOrb } from "thinking-orbs";
+import { OrbLoader as ThinkingOrb } from "./OrbLoader";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Download, Pencil, Trash2, Upload } from "lucide-react";
 import { useEffect, useRef, useState } from "react";

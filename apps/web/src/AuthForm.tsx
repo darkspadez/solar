@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ThinkingOrb } from "thinking-orbs";
+import { OrbLoader as ThinkingOrb } from "./chat/OrbLoader";
 import { signIn } from "./auth";
 import { useGoogleAuthEnabled } from "./authProviders";
 import { ThemeToggle } from "./ThemeToggle";

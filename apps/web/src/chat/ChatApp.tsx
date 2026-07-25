@@ -1,6 +1,6 @@
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ThinkingOrb } from "thinking-orbs";
+import { OrbLoader as ThinkingOrb } from "./OrbLoader";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
 	Check,
