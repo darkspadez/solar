@@ -602,6 +602,62 @@ function TaskModel() {
 	);
 }
 
+function SpeechModel() {
+	const trpc = useTRPC();
+	const qc = useQueryClient();
+	const available = useQuery(trpc.model.available.queryOptions());
+	const speechModel = useQuery(trpc.model.speechModel.queryOptions());
+
+	const setSpeechModel = useMutation(
+		trpc.model.setSpeechModel.mutationOptions({
+			onSuccess: () =>
+				qc.invalidateQueries({ queryKey: trpc.model.speechModel.queryKey() }),
+		}),
+	);
+
+	const models = available.data ?? [];
+	const selected = speechModel.data ? modelKey(speechModel.data) : "";
+
+	return (
+		<section className="card card-border bg-base-100 shadow-sm">
+			<div className="card-body gap-4 p-5">
+				<h3 className="card-title">Speech model</h3>
+				<p className="text-sm opacity-70">
+					Used for WebRTC realtime voice transcription and conversational audio. Must be a model supporting the OpenAI Realtime API.
+				</p>
+				<fieldset className="fieldset max-w-lg">
+					<legend className="fieldset-legend">Selected model</legend>
+					<select
+						className="select w-full"
+						value={selected}
+						disabled={!models.length || setSpeechModel.isPending}
+						onChange={(event) => {
+							const model = models.find(
+								(item) => modelKey(item) === event.target.value,
+							);
+							if (model) setSpeechModel.mutate(model);
+						}}
+					>
+						<option value="" disabled>
+							{models.length ? "Select a speech model" : "No models configured"}
+						</option>
+						{models.map((model) => (
+							<option key={modelKey(model)} value={modelKey(model)}>
+								{model.name} · {model.provider}
+							</option>
+						))}
+					</select>
+				</fieldset>
+				{setSpeechModel.isError && (
+					<div role="alert" className="alert alert-error alert-soft">
+						{setSpeechModel.error?.message}
+					</div>
+				)}
+			</div>
+		</section>
+	);
+}
+
 function ProviderCard({ initial }: { initial: ProviderForm }) {
 	const trpc = useTRPC();
 	const qc = useQueryClient();
@@ -1839,6 +1895,7 @@ const sections = [
 	"api keys",
 	"providers",
 	"task model",
+	"speech model",
 	"paste handling",
 	"usage",
 	"logging",
@@ -1900,6 +1957,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
 						{section === "usage" && <Usage />}
 						{section === "logging" && <Logging />}
 						{section === "task model" && <TaskModel />}
+						{section === "speech model" && <SpeechModel />}
 						{section === "paste handling" && <PasteHandling />}
 						{section === "providers" && providers.isError && (
 							<div role="alert" className="alert alert-error alert-soft">

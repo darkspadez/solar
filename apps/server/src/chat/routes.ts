@@ -24,6 +24,7 @@ import {
 	getModelCapabilities,
 	documentInputCapabilities,
 	resolveSelection,
+	resolveModel,
 	resolveTaskModelOrFallback,
 	documentInputMimeTypes,
 	type GenerationParams,
@@ -55,6 +56,12 @@ const chatPostSchema = z.object({
 	attachmentIds: z.array(z.string()).optional(),
 	userLocation: z.unknown().optional(),
 	skillName: z.string().max(64).regex(SKILL_NAME_PATTERN).optional(),
+});
+
+const syncVoiceTurnSchema = z.object({
+	conversationId: z.string().min(1),
+	userText: z.string().min(1),
+	assistantText: z.string().min(1),
 });
 
 interface AuthenticatedUser {
@@ -690,4 +697,120 @@ chatRoutes.post("/force-stop", async (c) => {
 			.execute();
 	}
 	return c.json({ stopped: result.numUpdatedRows > 0 });
+});
+
+chatRoutes.get("/realtime-token", async (c) => {
+	const user = await requireUser(c.req.raw);
+	if (!user) return c.json({ error: "unauthorized" }, 401);
+
+	const conversationId = c.req.query("conversationId");
+	if (!conversationId) return c.json({ error: "conversationId required" }, 400);
+	if (!(await ownsConversation(user.id, conversationId)))
+		return c.json({ error: "conversation not found" }, 404);
+
+	const convo = await db
+		.selectFrom("conversation")
+		.select(["systemPrompt"])
+		.where("id", "=", conversationId)
+		.executeTakeFirst();
+	
+	const { resolveSpeechModel, resolveModel } = await import("./catalog");
+	const selection = await resolveSpeechModel();
+
+	const { apiKey, model } = await resolveModel(selection);
+	if (!apiKey) return c.json({ error: "Provider not configured" }, 400);
+
+	const baseUrl = model.baseUrl || "https://api.openai.com/v1";
+	const clientSecretsUrl = `${baseUrl.replace(/\/+$/, "")}/realtime/client_secrets`;
+	const realtimeUrl = `${baseUrl.replace(/\/+$/, "")}/realtime?model=${model.id}`;
+
+	let userLoc;
+	const userLocStr = c.req.query("userLocation");
+	if (userLocStr) {
+		try {
+			userLoc = JSON.parse(userLocStr);
+		} catch (e) {
+			// ignore
+		}
+	}
+
+	const systemPrompt = renderBuiltinPromptInterpolations(
+		convo?.systemPrompt,
+		parseUserLocation(userLoc),
+	) ?? "You are a helpful assistant.";
+
+	const response = await fetch(clientSecretsUrl, {
+		method: "POST",
+		headers: {
+			"Authorization": `Bearer ${apiKey}`,
+			"Content-Type": "application/json",
+			"OpenAI-Safety-Identifier": user.id,
+		},
+		body: JSON.stringify({
+			session: {
+				type: "realtime",
+				model: model.id,
+				instructions: systemPrompt,
+				voice: "alloy",
+				input_audio_transcription: { model: "whisper-1" },
+			}
+		})
+	});
+
+	if (!response.ok) {
+		const text = await response.text();
+		return c.json({ error: `Failed to fetch token: ${text}` }, 500);
+	}
+
+	const data = await response.json();
+	return c.json({ ...data, realtimeUrl });
+});
+
+chatRoutes.post("/sync-voice-turn", async (c) => {
+	const user = await requireUser(c.req.raw);
+	if (!user) return c.json({ error: "unauthorized" }, 401);
+
+	const parsed = syncVoiceTurnSchema.safeParse(await c.req.json());
+	if (!parsed.success) {
+		return c.json({ error: "missing required fields" }, 400);
+	}
+	const { conversationId, userText, assistantText } = parsed.data;
+	if (!(await ownsConversation(user.id, conversationId)))
+		return c.json({ error: "conversation not found" }, 404);
+
+	const userMessageId = crypto.randomUUID();
+	const assistantMessageId = crypto.randomUUID();
+	const userCreatedAt = new Date();
+	const assistantCreatedAt = new Date(userCreatedAt.getTime() + 1);
+	await db.transaction().execute(async (trx) => {
+		await trx
+			.insertInto("message")
+			.values({
+				id: userMessageId,
+				conversationId,
+				role: "user",
+				text: userText,
+				status: "complete",
+				createdAt: userCreatedAt.toISOString(),
+			})
+			.execute();
+		await trx
+			.insertInto("message")
+			.values({
+				id: assistantMessageId,
+				conversationId,
+				role: "assistant",
+				text: assistantText,
+				status: "complete",
+				createdAt: assistantCreatedAt.toISOString(),
+			})
+			.execute();
+		await trx
+			.updateTable("conversation")
+			.set({ updatedAt: assistantCreatedAt.toISOString() })
+			.where("id", "=", conversationId)
+			.execute();
+	});
+
+	return c.json({ success: true });
 });

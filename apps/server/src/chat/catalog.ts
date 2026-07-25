@@ -221,6 +221,7 @@ export async function listAvailableModels(
 
 const ADMIN_DEFAULT_KEY = "default_model";
 const TASK_MODEL_KEY = "task_model";
+const SPEECH_MODEL_KEY = "speech_model";
 const TITLE_PROMPT_KEY = "title_prompt";
 export const THINKING_LEVELS = [
 	"minimal",
@@ -403,6 +404,14 @@ export async function setTaskModel(selection: ModelSelection): Promise<void> {
 	await setAppMetaSelection(TASK_MODEL_KEY, selection);
 }
 
+export async function getSpeechModel(): Promise<ModelSelection | null> {
+	return getAppMetaSelection(SPEECH_MODEL_KEY);
+}
+
+export async function setSpeechModel(selection: ModelSelection): Promise<void> {
+	await setAppMetaSelection(SPEECH_MODEL_KEY, selection);
+}
+
 export async function getTitlePrompt(): Promise<string> {
 	const row = await db
 		.selectFrom("app_meta")
@@ -430,6 +439,18 @@ export async function resolveTaskModel(): Promise<ModelSelection> {
 			"No task model is configured. Select one in admin settings.",
 		);
 	return taskModel;
+}
+
+export async function resolveSpeechModel(): Promise<ModelSelection> {
+	const speechModel = findAvailable(
+		await listAvailableModels(),
+		await getSpeechModel(),
+	);
+	if (!speechModel)
+		throw new Error(
+			"No speech model is configured. Select one in admin settings.",
+		);
+	return speechModel;
 }
 
 export async function resolveTaskModelOrFallback(

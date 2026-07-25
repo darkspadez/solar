@@ -7,7 +7,6 @@ import {
 	useComposerRuntime,
 	useAuiState,
 } from "@assistant-ui/react";
-import { OrbLoader as ThinkingOrb } from "./OrbLoader";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
 	Brain,
@@ -23,6 +22,7 @@ import {
 	FileUp,
 	Image,
 	LoaderCircle,
+	Mic,
 	Plus,
 	Podcast,
 	Repeat2,
@@ -36,6 +36,7 @@ import {
 	X,
 } from "lucide-react";
 import { OrbLoader as ThinkingOrb } from "./OrbLoader";
+import { useOpenAIRealtime } from "./useOpenAIRealtime";
 import {
 	createContext,
 	useContext,
@@ -1422,10 +1423,12 @@ function McpControls({
 export function Thread({
 	conversationId,
 	onConfigureMcp,
+	onReloadHistory,
 	contextStatus,
 }: {
 	conversationId: string;
 	onConfigureMcp: () => void;
+	onReloadHistory: () => Promise<unknown>;
 	contextStatus?: ContextStatus;
 }) {
 	const composer = useComposerRuntime();
@@ -1451,6 +1454,32 @@ export function Thread({
 	const composerRef = useRef<HTMLDivElement>(null);
 	const dragDepth = useRef(0);
 	const [composerHeight, setComposerHeight] = useState(88);
+	const [voiceError, setVoiceError] = useState<string | null>(null);
+	const syncVoiceTurn = async (userText: string, assistantText: string) => {
+		setVoiceError(null);
+		try {
+			const response = await fetch("/api/chat/sync-voice-turn", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ conversationId, userText, assistantText }),
+			});
+			if (!response.ok) throw new Error("Could not save the voice turn");
+			await onReloadHistory();
+		} catch (error) {
+			setVoiceError(
+				error instanceof Error ? error.message : "Could not save the voice turn",
+			);
+		}
+	};
+	const {
+		status: voiceStatus,
+		userTranscript,
+		assistantTranscript,
+		start: startVoice,
+		stop: stopVoice,
+		error: realtimeError,
+	} = useOpenAIRealtime(conversationId, syncVoiceTurn);
+	const voiceActive = voiceStatus === "active" || voiceStatus === "connecting";
 
 	// Keep the message list's bottom padding in sync with the floating composer
 	// so the last line of a reply is never hidden behind it.
@@ -1573,6 +1602,25 @@ export function Thread({
 								AssistantMessage,
 							}}
 						/>
+						{voiceActive && (
+							<div className="flex flex-col gap-2 px-1 pb-2">
+								{userTranscript && (
+									<div className="self-end rounded-2xl bg-primary px-3 py-2 text-sm text-primary-content shadow-sm">
+										{userTranscript}
+									</div>
+								)}
+								{assistantTranscript && (
+									<div className="self-start rounded-2xl bg-base-200 px-3 py-2 text-sm text-base-content shadow-sm">
+										{assistantTranscript}
+									</div>
+								)}
+								{!userTranscript && !assistantTranscript && (
+									<span className="self-start text-xs text-primary">
+										{voiceStatus === "connecting" ? "Connecting voice…" : "Listening…"}
+									</span>
+								)}
+							</div>
+						)}
 					</ThreadPrimitive.Viewport>
 
 					<div ref={composerRef} className="solar-composer-dock">
@@ -1596,6 +1644,11 @@ export function Thread({
 									{attachmentError}
 								</div>
 							)}
+							{(voiceError || realtimeError) && (
+								<div role="alert" className="alert alert-error alert-soft text-sm">
+									{voiceError || realtimeError?.message}
+								</div>
+							)}
 							<SkillAutocomplete
 								key={skillAutocompleteReset}
 								onPaste={handlePaste}
@@ -1610,6 +1663,18 @@ export function Thread({
 										attachmentAccept={attachmentAccept}
 										disabled={!model.data}
 									/>
+									<button
+										type="button"
+										className={`btn btn-ghost btn-sm btn-circle${voiceActive ? " text-primary" : ""}`}
+										title={voiceActive ? "Stop voice conversation" : "Start voice conversation"}
+										onClick={() => {
+											setVoiceError(null);
+											if (voiceActive) stopVoice();
+											else startVoice();
+										}}
+									>
+										<Podcast size={20} />
+									</button>
 									<div className="solar-composer-divider" />
 									<GenerationControls conversationId={conversationId} />
 									<McpControls

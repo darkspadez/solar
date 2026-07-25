@@ -18,6 +18,8 @@ import {
 	getModelCapabilities,
 	documentInputMimeTypes,
 	getTaskModel,
+	getSpeechModel,
+	setSpeechModel,
 	getTitlePrompt,
 	getUserDefault,
 	getUserDefaultPreset,
@@ -1977,6 +1979,8 @@ const modelRouter = router({
 
 	taskModel: adminProcedure.query(() => getTaskModel()),
 
+	speechModel: adminProcedure.query(() => getSpeechModel()),
+
 	titlePrompt: adminProcedure.query(() => getTitlePrompt()),
 
 	setTitlePrompt: adminProcedure
@@ -2003,6 +2007,26 @@ const modelRouter = router({
 				});
 			}
 			await setTaskModel(input);
+		}),
+
+	setSpeechModel: adminProcedure
+		.input(modelSelectionSchema)
+		.mutation(async ({ input }) => {
+			const available = await listAvailableModels();
+			const isAvailable = available.some(
+				(model) =>
+					model.provider === input.provider &&
+					model.endpointId === input.endpointId &&
+					model.modelId === input.modelId &&
+					model.api === input.api,
+			);
+			if (!isAvailable) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "model unavailable",
+				});
+			}
+			await setSpeechModel(input);
 		}),
 });
 

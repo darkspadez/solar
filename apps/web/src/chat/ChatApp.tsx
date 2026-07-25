@@ -388,6 +388,7 @@ function ConversationView({
 						conversationId={conversationId}
 						onConfigureMcp={onConfigureMcp}
 						contextStatus={context.data}
+						onReloadHistory={async () => { await runtime.loadHistory(); }}
 					/>
 				</div>
 			</div>
