@@ -6,7 +6,7 @@
     "setup": [
       "command -v mise >/dev/null 2>&1 && mise trust || true",
       "command -v mise >/dev/null 2>&1 && mise install || true",
-      "bun install"
+      "bun run init-worktree"
     ],
     "teardown": "bun run solar dev stop && rm -f apps/server/solar.db apps/server/solar.db-shm apps/server/solar.db-wal"
   },

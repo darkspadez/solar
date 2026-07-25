@@ -15,6 +15,7 @@
   ],
   "scripts": {
     "solar": "bun run scripts/solar.ts",
+    "init-worktree": "bun run scripts/init-worktree.ts",
     "dev": "command -v paseo >/dev/null 2>&1 && paseo script start web || bun run scripts/solar.ts dev start",
     "build": "command -v paseo >/dev/null 2>&1 && paseo script start build || bun run --cwd apps/web build",
     "format": "command -v paseo >/dev/null 2>&1 && paseo script start format || biome format --write .",
