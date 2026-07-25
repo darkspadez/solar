@@ -7,6 +7,7 @@ import {
 	useComposerRuntime,
 	useAuiState,
 } from "@assistant-ui/react";
+import { ThinkingOrb } from "thinking-orbs";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
 	Brain,
@@ -278,7 +279,7 @@ export function ContextStatusIndicator({ status }: { status?: ContextStatus }) {
 	if (status.state === "running") {
 		return (
 			<span className="flex items-center gap-1 text-xs text-info">
-				<span className="loading loading-spinner loading-xs" />
+				<ThinkingOrb state="working" size={20} />
 				Summarizing history...
 			</span>
 		);
@@ -889,7 +890,7 @@ export function AssistantStatusIndicator({
 					title="Connecting…"
 					aria-label="Connecting"
 				>
-					<Unplug size={14} />
+					<ThinkingOrb state="searching" size={20} />
 				</span>
 			);
 		case "request-sent":
@@ -899,7 +900,7 @@ export function AssistantStatusIndicator({
 					title="Request sent…"
 					aria-label="Request sent"
 				>
-					<Send size={14} />
+					<ThinkingOrb state="working" size={20} />
 				</span>
 			);
 		case "in-progress":
@@ -909,7 +910,7 @@ export function AssistantStatusIndicator({
 					title="Response in progress…"
 					aria-label="Response in progress"
 				>
-					<CloudBackup size={14} />
+					<ThinkingOrb state="composing" size={20} />
 				</span>
 			);
 		case "complete":
@@ -1149,7 +1150,7 @@ export function EmptyAssistantResponse({
 				{forceStopHovered ? (
 					<Ban className="text-error" size={18} />
 				) : (
-					<LoaderCircle className="solar-response-loader" size={18} />
+					<ThinkingOrb state="working" size={20} className="solar-response-loader" />
 				)}
 			</button>
 		);

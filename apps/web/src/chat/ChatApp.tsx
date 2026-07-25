@@ -1,5 +1,6 @@
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ThinkingOrb } from "thinking-orbs";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
 	Check,
@@ -188,7 +189,7 @@ function ConversationInfoMenu({ conversationId }: { conversationId: string }) {
 						onClick={() => compactMutation.mutate({ conversationId })}
 					>
 						{isCompacting ? (
-							<span className="loading loading-spinner loading-xs" />
+							<ThinkingOrb state="working" size={20} />
 						) : (
 							<Sparkles size={15} />
 						)}
