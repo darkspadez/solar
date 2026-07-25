@@ -714,15 +714,14 @@ chatRoutes.get("/realtime-token", async (c) => {
 		.where("id", "=", conversationId)
 		.executeTakeFirst();
 	
-	const { resolveSpeechModel, resolveModel } = await import("./catalog");
-	const selection = await resolveSpeechModel();
+	const { getSpeechConfig } = await import("./catalog");
+	const { apiKey, baseUrl, modelId, transcriptionModel, voice } = await getSpeechConfig();
 
-	const { apiKey, model } = await resolveModel(selection);
-	if (!apiKey) return c.json({ error: "Provider not configured" }, 400);
+	if (!apiKey) return c.json({ error: "Speech API key not configured" }, 400);
 
-	const baseUrl = model.baseUrl || "https://api.openai.com/v1";
-	const clientSecretsUrl = `${baseUrl.replace(/\/+$/, "")}/realtime/client_secrets`;
-	const realtimeUrl = `${baseUrl.replace(/\/+$/, "")}/realtime?model=${model.id}`;
+	const effectiveBaseUrl = baseUrl || "https://api.openai.com/v1";
+	const clientSecretsUrl = `${effectiveBaseUrl.replace(/\/+$/, "")}/realtime/client_secrets`;
+	const realtimeUrl = `${effectiveBaseUrl.replace(/\/+$/, "")}/realtime/calls`;
 
 	let userLoc;
 	const userLocStr = c.req.query("userLocation");
@@ -749,10 +748,21 @@ chatRoutes.get("/realtime-token", async (c) => {
 		body: JSON.stringify({
 			session: {
 				type: "realtime",
-				model: model.id,
+				model: modelId,
 				instructions: systemPrompt,
-				voice: "alloy",
-				input_audio_transcription: { model: "whisper-1" },
+				audio: {
+					input: {
+						transcription: { model: transcriptionModel },
+						turn_detection: {
+							type: "semantic_vad",
+							eagerness: "high",
+							interrupt_response: true
+						}
+					},
+					output: {
+						voice: voice
+					}
+				}
 			}
 		})
 	});

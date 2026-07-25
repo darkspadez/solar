@@ -18,8 +18,8 @@ import {
 	getModelCapabilities,
 	documentInputMimeTypes,
 	getTaskModel,
-	getSpeechModel,
-	setSpeechModel,
+	getSpeechConfig,
+	setSpeechConfig,
 	getTitlePrompt,
 	getUserDefault,
 	getUserDefaultPreset,
@@ -1979,7 +1979,16 @@ const modelRouter = router({
 
 	taskModel: adminProcedure.query(() => getTaskModel()),
 
-	speechModel: adminProcedure.query(() => getSpeechModel()),
+	speechConfig: adminProcedure.query(async () => {
+		const config = await getSpeechConfig();
+		return {
+			hasApiKey: Boolean(config.apiKey),
+			baseUrl: config.baseUrl,
+			modelId: config.modelId,
+			transcriptionModel: config.transcriptionModel,
+			voice: config.voice,
+		};
+	}),
 
 	titlePrompt: adminProcedure.query(() => getTitlePrompt()),
 
@@ -2009,24 +2018,18 @@ const modelRouter = router({
 			await setTaskModel(input);
 		}),
 
-	setSpeechModel: adminProcedure
-		.input(modelSelectionSchema)
+	setSpeechConfig: adminProcedure
+		.input(
+			z.object({
+				apiKey: z.string().optional(),
+				baseUrl: z.string().min(1),
+				modelId: z.string().min(1),
+				transcriptionModel: z.string().min(1),
+				voice: z.string().min(1),
+			}),
+		)
 		.mutation(async ({ input }) => {
-			const available = await listAvailableModels();
-			const isAvailable = available.some(
-				(model) =>
-					model.provider === input.provider &&
-					model.endpointId === input.endpointId &&
-					model.modelId === input.modelId &&
-					model.api === input.api,
-			);
-			if (!isAvailable) {
-				throw new TRPCError({
-					code: "BAD_REQUEST",
-					message: "model unavailable",
-				});
-			}
-			await setSpeechModel(input);
+			await setSpeechConfig(input);
 		}),
 });
 

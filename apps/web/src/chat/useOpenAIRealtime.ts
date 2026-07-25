@@ -15,6 +15,7 @@ interface RealtimeEvent {
 	type?: string;
 	delta?: string;
 	error?: { message?: string };
+	item?: { id?: string; role?: string };
 }
 
 interface RealtimeTokenResponse {
@@ -39,6 +40,7 @@ export function useOpenAIRealtime(
 	
 	const userTranscriptRef = useRef("");
 	const assistantTranscriptRef = useRef("");
+	const assistantItemIdRef = useRef<string | null>(null);
 	const onTurnCompleteRef = useRef(onTurnComplete);
 	const sessionIdRef = useRef(0);
 	const disconnectTimerRef = useRef<Timer | null>(null);
@@ -172,6 +174,21 @@ export function useOpenAIRealtime(
 				) {
 					userTranscriptRef.current += event.delta;
 					setUserTranscript(userTranscriptRef.current);
+				} else if (event.type === "conversation.item.created" && event.item?.role === "assistant" && event.item.id) {
+					assistantItemIdRef.current = event.item.id;
+				} else if (event.type === "input_audio_buffer.speech_started") {
+					if (assistantItemIdRef.current && audioRef.current) {
+						const audio_end_ms = Math.floor(audioRef.current.currentTime * 1000);
+						dataChannel.send(
+							JSON.stringify({
+								type: "conversation.item.truncate",
+								item_id: assistantItemIdRef.current,
+								content_index: 0,
+								audio_end_ms,
+							})
+						);
+						assistantItemIdRef.current = null;
+					}
 				} else if (event.type === "response.done") {
 					const userText = userTranscriptRef.current;
 					const assistantText = assistantTranscriptRef.current;
@@ -186,7 +203,7 @@ export function useOpenAIRealtime(
 
 			const offer = await peerConnection.createOffer();
 			await peerConnection.setLocalDescription(offer);
-			const answerResponse = await fetch(tokenData.realtimeUrl || "https://api.openai.com/v1/realtime?model=gpt-realtime-2.1-mini", {
+			const answerResponse = await fetch(tokenData.realtimeUrl || "https://api.openai.com/v1/realtime/calls", {
 				method: "POST",
 				headers: {
 					Authorization: `Bearer ${ephemeralToken}`,
