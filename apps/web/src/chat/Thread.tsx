@@ -35,6 +35,7 @@ import {
 	Unplug,
 	X,
 } from "lucide-react";
+import { ThinkingOrb } from "thinking-orbs";
 import {
 	createContext,
 	useContext,
@@ -279,7 +280,7 @@ export function ContextStatusIndicator({ status }: { status?: ContextStatus }) {
 	if (status.state === "running") {
 		return (
 			<span className="flex items-center gap-1 text-xs text-info">
-				<ThinkingOrb state="working" size={20} />
+				<ThinkingOrb state="searching" size={20} />
 				Summarizing history...
 			</span>
 		);
@@ -1150,7 +1151,11 @@ export function EmptyAssistantResponse({
 				{forceStopHovered ? (
 					<Ban className="text-error" size={18} />
 				) : (
-					<ThinkingOrb state="working" size={20} className="solar-response-loader" />
+					<ThinkingOrb
+						state="working"
+						size={20}
+						className="solar-response-loader"
+					/>
 				)}
 			</button>
 		);
