@@ -21,7 +21,6 @@ const commands: readonly Command[] = [
   { label: 'Rebase worktree onto origin/main', cmd: ['git', 'rebase', 'origin/main'] },
   { label: 'Trust mise configuration', cmd: ['mise', 'trust'] },
   { label: 'Install Bun dependencies', cmd: ['bun', 'install'] },
-  { label: 'Run Migrations', cmd: ['bun', 'run', 'migrate'] },
   {
     label: 'Update Agent Skills',
     // Using `|| true` to ensure network failures don't crash the worktree setup
