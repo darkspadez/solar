@@ -705,6 +705,9 @@ chatRoutes.get("/realtime-token", async (c) => {
 
 	const conversationId = c.req.query("conversationId");
 	if (!conversationId) return c.json({ error: "conversationId required" }, 400);
+	logger
+		.withMetadata({ conversationId, userId: user.id })
+		.info("voice realtime token requested");
 	if (!(await ownsConversation(user.id, conversationId)))
 		return c.json({ error: "conversation not found" }, 404);
 
@@ -713,9 +716,25 @@ chatRoutes.get("/realtime-token", async (c) => {
 		.select(["systemPrompt"])
 		.where("id", "=", conversationId)
 		.executeTakeFirst();
-	
+	const messageHistory = (
+		await db
+			.selectFrom("message")
+			.select(["role", "text"])
+			.where("conversationId", "=", conversationId)
+			.where("status", "=", "complete")
+			.where("role", "in", ["user", "assistant"])
+			.orderBy("createdAt", "asc")
+			.execute()
+	)
+		.map((message) => ({
+			role: message.role as "user" | "assistant",
+			text: message.text.trim(),
+		}))
+		.filter((message) => message.text.length > 0);
+
 	const { getSpeechConfig } = await import("./catalog");
-	const { apiKey, baseUrl, modelId, transcriptionModel, voice } = await getSpeechConfig();
+	const { apiKey, baseUrl, modelId, transcriptionModel, voice } =
+		await getSpeechConfig();
 
 	if (!apiKey) return c.json({ error: "Speech API key not configured" }, 400);
 
@@ -733,15 +752,16 @@ chatRoutes.get("/realtime-token", async (c) => {
 		}
 	}
 
-	const systemPrompt = renderBuiltinPromptInterpolations(
-		convo?.systemPrompt,
-		parseUserLocation(userLoc),
-	) ?? "You are a helpful assistant.";
+	const systemPrompt =
+		renderBuiltinPromptInterpolations(
+			convo?.systemPrompt,
+			parseUserLocation(userLoc),
+		) ?? "You are a helpful assistant.";
 
 	const response = await fetch(clientSecretsUrl, {
 		method: "POST",
 		headers: {
-			"Authorization": `Bearer ${apiKey}`,
+			Authorization: `Bearer ${apiKey}`,
 			"Content-Type": "application/json",
 			"OpenAI-Safety-Identifier": user.id,
 		},
@@ -756,16 +776,19 @@ chatRoutes.get("/realtime-token", async (c) => {
 						turn_detection: {
 							type: "semantic_vad",
 							eagerness: "high",
-							interrupt_response: true
-						}
+							interrupt_response: true,
+						},
 					},
 					output: {
-						voice: voice
-					}
-				}
-			}
-		})
+						voice: voice,
+					},
+				},
+			},
+		}),
 	});
+	logger
+		.withMetadata({ conversationId, userId: user.id, status: response.status })
+		.info("voice realtime token upstream response");
 
 	if (!response.ok) {
 		const text = await response.text();
@@ -773,7 +796,14 @@ chatRoutes.get("/realtime-token", async (c) => {
 	}
 
 	const data = await response.json();
-	return c.json({ ...data, realtimeUrl });
+	logger
+		.withMetadata({
+			conversationId,
+			userId: user.id,
+			historyMessages: messageHistory.length,
+		})
+		.info("voice realtime token issued");
+	return c.json({ ...data, realtimeUrl, history: messageHistory });
 });
 
 chatRoutes.post("/sync-voice-turn", async (c) => {
@@ -782,9 +812,26 @@ chatRoutes.post("/sync-voice-turn", async (c) => {
 
 	const parsed = syncVoiceTurnSchema.safeParse(await c.req.json());
 	if (!parsed.success) {
+		logger
+			.withMetadata({
+				userId: user.id,
+				issues: parsed.error.issues.map((issue) => ({
+					code: issue.code,
+					path: issue.path,
+				})),
+			})
+			.warn("voice turn sync rejected");
 		return c.json({ error: "missing required fields" }, 400);
 	}
 	const { conversationId, userText, assistantText } = parsed.data;
+	logger
+		.withMetadata({
+			conversationId,
+			userId: user.id,
+			userChars: userText.length,
+			assistantChars: assistantText.length,
+		})
+		.info("voice turn sync received");
 	if (!(await ownsConversation(user.id, conversationId)))
 		return c.json({ error: "conversation not found" }, 404);
 
@@ -821,6 +868,14 @@ chatRoutes.post("/sync-voice-turn", async (c) => {
 			.where("id", "=", conversationId)
 			.execute();
 	});
+	logger
+		.withMetadata({
+			conversationId,
+			userId: user.id,
+			userMessageId,
+			assistantMessageId,
+		})
+		.info("voice turn sync persisted");
 
 	return c.json({ success: true });
 });

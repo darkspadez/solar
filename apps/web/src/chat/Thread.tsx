@@ -40,6 +40,7 @@ import { useOpenAIRealtime } from "./useOpenAIRealtime";
 import {
 	createContext,
 	useContext,
+	useCallback,
 	useEffect,
 	useRef,
 	useState,
@@ -1455,24 +1456,49 @@ export function Thread({
 	const dragDepth = useRef(0);
 	const [composerHeight, setComposerHeight] = useState(88);
 	const [voiceError, setVoiceError] = useState<string | null>(null);
-	const syncVoiceTurn = async (userText: string, assistantText: string) => {
-		setVoiceError(null);
-		try {
-			const response = await fetch("/api/chat/sync-voice-turn", {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({ conversationId, userText, assistantText }),
+	const voiceSyncQueueRef = useRef(Promise.resolve());
+	const syncVoiceTurn = useCallback(
+		(userText: string, assistantText: string) => {
+			const sync = voiceSyncQueueRef.current.then(async () => {
+				setVoiceError(null);
+				console.info("[voice/sync] saving turn", {
+					conversationId,
+					userChars: userText.length,
+					assistantChars: assistantText.length,
+				});
+				const response = await fetch("/api/chat/sync-voice-turn", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ conversationId, userText, assistantText }),
+				});
+				console.info("[voice/sync] save response", {
+					conversationId,
+					status: response.status,
+				});
+				if (!response.ok) throw new Error("Could not save the voice turn");
+				await onReloadHistory();
+				console.info("[voice/sync] canonical history reloaded", {
+					conversationId,
+				});
 			});
-			if (!response.ok) throw new Error("Could not save the voice turn");
-			await onReloadHistory();
-		} catch (error) {
-			setVoiceError(
-				error instanceof Error ? error.message : "Could not save the voice turn",
-			);
-		}
-	};
+			voiceSyncQueueRef.current = sync.catch((error) => {
+				console.error("[voice/sync] turn save failed", {
+					conversationId,
+					error: error instanceof Error ? error.message : String(error),
+				});
+				setVoiceError(
+					error instanceof Error
+						? error.message
+						: "Could not save the voice turn",
+				);
+			});
+			return sync;
+		},
+		[conversationId, onReloadHistory],
+	);
 	const {
 		status: voiceStatus,
+		activity: voiceActivity,
 		userTranscript,
 		assistantTranscript,
 		start: startVoice,
@@ -1603,22 +1629,62 @@ export function Thread({
 							}}
 						/>
 						{voiceActive && (
-							<div className="flex flex-col gap-2 px-1 pb-2">
+							<div className="solar-message mt-auto gap-3 pb-2">
 								{userTranscript && (
-									<div className="self-end rounded-2xl bg-primary px-3 py-2 text-sm text-primary-content shadow-sm">
-										{userTranscript}
+									<div className="solar-message solar-message-user">
+										<div className="solar-user-output text-sm">
+											{userTranscript}
+										</div>
 									</div>
 								)}
 								{assistantTranscript && (
-									<div className="self-start rounded-2xl bg-base-200 px-3 py-2 text-sm text-base-content shadow-sm">
-										{assistantTranscript}
+									<div className="solar-message solar-message-assistant">
+										<div className="solar-assistant-identity">
+											<span className="solar-assistant-avatar">
+												<Bot size={18} />
+											</span>
+											<span className="solar-assistant-name">
+												Voice assistant
+											</span>
+										</div>
+										<div className="solar-assistant-output text-sm">
+											{assistantTranscript}
+										</div>
 									</div>
 								)}
-								{!userTranscript && !assistantTranscript && (
-									<span className="self-start text-xs text-primary">
-										{voiceStatus === "connecting" ? "Connecting voice…" : "Listening…"}
-									</span>
-								)}
+								<div className="flex items-center gap-3 rounded-box border border-base-300 bg-base-100 px-3 py-2 shadow-sm">
+									<ThinkingOrb
+										state={
+											voiceActivity === "assistant-speaking"
+												? "composing"
+												: voiceActivity === "user-speaking"
+													? "working"
+													: "searching"
+										}
+										size={20}
+									/>
+									<div className="min-w-0 flex-1">
+										<div className="text-sm font-medium text-base-content">
+											{voiceActivity === "connecting"
+												? "Connecting voice"
+												: voiceActivity === "user-speaking"
+													? "Hearing you"
+													: voiceActivity === "assistant-speaking"
+														? "Assistant responding"
+														: "Listening"}
+										</div>
+										<div className="text-xs text-base-content/60">
+											{voiceActivity === "user-speaking"
+												? "Speak naturally — your words appear above"
+												: voiceActivity === "assistant-speaking"
+													? "You can interrupt at any time"
+													: "Start speaking when you’re ready"}
+										</div>
+									</div>
+									<span
+										className={`status status-sm ${voiceActivity === "user-speaking" ? "status-info" : voiceActivity === "assistant-speaking" ? "status-primary" : "status-success"}`}
+									/>
+								</div>
 							</div>
 						)}
 					</ThreadPrimitive.Viewport>
@@ -1645,7 +1711,10 @@ export function Thread({
 								</div>
 							)}
 							{(voiceError || realtimeError) && (
-								<div role="alert" className="alert alert-error alert-soft text-sm">
+								<div
+									role="alert"
+									className="alert alert-error alert-soft text-sm"
+								>
 									{voiceError || realtimeError?.message}
 								</div>
 							)}
@@ -1666,7 +1735,11 @@ export function Thread({
 									<button
 										type="button"
 										className={`btn btn-ghost btn-sm btn-circle${voiceActive ? " text-primary" : ""}`}
-										title={voiceActive ? "Stop voice conversation" : "Start voice conversation"}
+										title={
+											voiceActive
+												? "Stop voice conversation"
+												: "Start voice conversation"
+										}
 										onClick={() => {
 											setVoiceError(null);
 											if (voiceActive) stopVoice();
