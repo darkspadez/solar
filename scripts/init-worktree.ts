@@ -25,7 +25,7 @@ const commands: readonly Command[] = [
   {
     label: 'Update Agent Skills',
     // Using `|| true` to ensure network failures don't crash the worktree setup
-    cmd: ['sh', '-c', 'bunx --bun skills experimental_install || true'],
+    cmd: ['sh', '-c', 'bunx --bun skills experimental_install >/dev/null 2>&1 || true'],
   },
   {
     label: 'Auto-commit updated skills (if changed)',

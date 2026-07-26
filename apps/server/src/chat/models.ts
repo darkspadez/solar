@@ -132,11 +132,13 @@ export async function* streamChat(
 						accumulatedText.length > 0
 					) {
 						newTurnTextStarted = true;
-						const padding = accumulatedText.endsWith("\n\n")
+						const padding = /^[\s:;,.!?)}\]]/.test(event.delta)
 							? ""
-							: accumulatedText.endsWith("\n")
-								? "\n"
-								: "\n\n";
+							: accumulatedText.endsWith("\n\n")
+								? ""
+								: accumulatedText.endsWith("\n")
+									? "\n"
+									: "\n\n";
 						if (padding) {
 							accumulatedText += padding;
 							yield {
