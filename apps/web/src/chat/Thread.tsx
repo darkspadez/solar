@@ -22,7 +22,6 @@ import {
 	FileUp,
 	Image,
 	LoaderCircle,
-	Mic,
 	Plus,
 	Podcast,
 	Repeat2,
@@ -35,12 +34,9 @@ import {
 	Unplug,
 	X,
 } from "lucide-react";
-import { OrbLoader as ThinkingOrb } from "./OrbLoader";
-import { useOpenAIRealtime } from "./useOpenAIRealtime";
 import {
 	createContext,
 	useContext,
-	useCallback,
 	useEffect,
 	useRef,
 	useState,
@@ -282,7 +278,7 @@ export function ContextStatusIndicator({ status }: { status?: ContextStatus }) {
 	if (status.state === "running") {
 		return (
 			<span className="flex items-center gap-1 text-xs text-info">
-				<ThinkingOrb state="searching" size={20} />
+				<span className="loading loading-spinner loading-xs" />
 				Summarizing history...
 			</span>
 		);
@@ -893,7 +889,7 @@ export function AssistantStatusIndicator({
 					title="Connecting…"
 					aria-label="Connecting"
 				>
-					<ThinkingOrb state="searching" size={20} />
+					<Unplug size={14} />
 				</span>
 			);
 		case "request-sent":
@@ -903,7 +899,7 @@ export function AssistantStatusIndicator({
 					title="Request sent…"
 					aria-label="Request sent"
 				>
-					<ThinkingOrb state="working" size={20} />
+					<Send size={14} />
 				</span>
 			);
 		case "in-progress":
@@ -913,7 +909,7 @@ export function AssistantStatusIndicator({
 					title="Response in progress…"
 					aria-label="Response in progress"
 				>
-					<ThinkingOrb state="composing" size={20} />
+					<CloudBackup size={14} />
 				</span>
 			);
 		case "complete":
@@ -1153,11 +1149,7 @@ export function EmptyAssistantResponse({
 				{forceStopHovered ? (
 					<Ban className="text-error" size={18} />
 				) : (
-					<ThinkingOrb
-						state="working"
-						size={20}
-						className="solar-response-loader"
-					/>
+					<LoaderCircle className="solar-response-loader" size={18} />
 				)}
 			</button>
 		);
@@ -1424,12 +1416,10 @@ function McpControls({
 export function Thread({
 	conversationId,
 	onConfigureMcp,
-	onReloadHistory,
 	contextStatus,
 }: {
 	conversationId: string;
 	onConfigureMcp: () => void;
-	onReloadHistory: () => Promise<unknown>;
 	contextStatus?: ContextStatus;
 }) {
 	const composer = useComposerRuntime();
@@ -1455,57 +1445,6 @@ export function Thread({
 	const composerRef = useRef<HTMLDivElement>(null);
 	const dragDepth = useRef(0);
 	const [composerHeight, setComposerHeight] = useState(88);
-	const [voiceError, setVoiceError] = useState<string | null>(null);
-	const voiceSyncQueueRef = useRef(Promise.resolve());
-	const syncVoiceTurn = useCallback(
-		(userText: string, assistantText: string) => {
-			const sync = voiceSyncQueueRef.current.then(async () => {
-				setVoiceError(null);
-				console.info("[voice/sync] saving turn", {
-					conversationId,
-					userChars: userText.length,
-					assistantChars: assistantText.length,
-				});
-				const response = await fetch("/api/chat/sync-voice-turn", {
-					method: "POST",
-					headers: { "content-type": "application/json" },
-					body: JSON.stringify({ conversationId, userText, assistantText }),
-				});
-				console.info("[voice/sync] save response", {
-					conversationId,
-					status: response.status,
-				});
-				if (!response.ok) throw new Error("Could not save the voice turn");
-				await onReloadHistory();
-				console.info("[voice/sync] canonical history reloaded", {
-					conversationId,
-				});
-			});
-			voiceSyncQueueRef.current = sync.catch((error) => {
-				console.error("[voice/sync] turn save failed", {
-					conversationId,
-					error: error instanceof Error ? error.message : String(error),
-				});
-				setVoiceError(
-					error instanceof Error
-						? error.message
-						: "Could not save the voice turn",
-				);
-			});
-			return sync;
-		},
-		[conversationId, onReloadHistory],
-	);
-	const {
-		status: voiceStatus,
-		activity: voiceActivity,
-		userTranscript,
-		assistantTranscript,
-		start: startVoice,
-		stop: stopVoice,
-		error: realtimeError,
-	} = useOpenAIRealtime(conversationId, syncVoiceTurn);
-	const voiceActive = voiceStatus === "active" || voiceStatus === "connecting";
 
 	// Keep the message list's bottom padding in sync with the floating composer
 	// so the last line of a reply is never hidden behind it.
@@ -1628,65 +1567,6 @@ export function Thread({
 								AssistantMessage,
 							}}
 						/>
-						{voiceActive && (
-							<div className="solar-message mt-auto gap-3 pb-2">
-								{userTranscript && (
-									<div className="solar-message solar-message-user">
-										<div className="solar-user-output text-sm">
-											{userTranscript}
-										</div>
-									</div>
-								)}
-								{assistantTranscript && (
-									<div className="solar-message solar-message-assistant">
-										<div className="solar-assistant-identity">
-											<span className="solar-assistant-avatar">
-												<Bot size={18} />
-											</span>
-											<span className="solar-assistant-name">
-												Voice assistant
-											</span>
-										</div>
-										<div className="solar-assistant-output text-sm">
-											{assistantTranscript}
-										</div>
-									</div>
-								)}
-								<div className="flex items-center gap-3 rounded-box border border-base-300 bg-base-100 px-3 py-2 shadow-sm">
-									<ThinkingOrb
-										state={
-											voiceActivity === "assistant-speaking"
-												? "composing"
-												: voiceActivity === "user-speaking"
-													? "working"
-													: "searching"
-										}
-										size={20}
-									/>
-									<div className="min-w-0 flex-1">
-										<div className="text-sm font-medium text-base-content">
-											{voiceActivity === "connecting"
-												? "Connecting voice"
-												: voiceActivity === "user-speaking"
-													? "Hearing you"
-													: voiceActivity === "assistant-speaking"
-														? "Assistant responding"
-														: "Listening"}
-										</div>
-										<div className="text-xs text-base-content/60">
-											{voiceActivity === "user-speaking"
-												? "Speak naturally — your words appear above"
-												: voiceActivity === "assistant-speaking"
-													? "You can interrupt at any time"
-													: "Start speaking when you’re ready"}
-										</div>
-									</div>
-									<span
-										className={`status status-sm ${voiceActivity === "user-speaking" ? "status-info" : voiceActivity === "assistant-speaking" ? "status-primary" : "status-success"}`}
-									/>
-								</div>
-							</div>
-						)}
 					</ThreadPrimitive.Viewport>
 
 					<div ref={composerRef} className="solar-composer-dock">
@@ -1710,14 +1590,6 @@ export function Thread({
 									{attachmentError}
 								</div>
 							)}
-							{(voiceError || realtimeError) && (
-								<div
-									role="alert"
-									className="alert alert-error alert-soft text-sm"
-								>
-									{voiceError || realtimeError?.message}
-								</div>
-							)}
 							<SkillAutocomplete
 								key={skillAutocompleteReset}
 								onPaste={handlePaste}
@@ -1732,22 +1604,6 @@ export function Thread({
 										attachmentAccept={attachmentAccept}
 										disabled={!model.data}
 									/>
-									<button
-										type="button"
-										className={`btn btn-ghost btn-sm btn-circle${voiceActive ? " text-primary" : ""}`}
-										title={
-											voiceActive
-												? "Stop voice conversation"
-												: "Start voice conversation"
-										}
-										onClick={() => {
-											setVoiceError(null);
-											if (voiceActive) stopVoice();
-											else startVoice();
-										}}
-									>
-										<Podcast size={20} />
-									</button>
 									<div className="solar-composer-divider" />
 									<GenerationControls conversationId={conversationId} />
 									<McpControls

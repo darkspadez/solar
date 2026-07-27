@@ -260,7 +260,7 @@ function isDarkTheme() {
 	);
 }
 
-export function useDarkTheme() {
+function useDarkTheme() {
 	const [dark, setDark] = useState(isDarkTheme);
 
 	useEffect(() => {

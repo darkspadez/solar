@@ -1,6 +1,5 @@
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { OrbLoader as ThinkingOrb } from "./OrbLoader";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
 	Check,
@@ -189,7 +188,7 @@ function ConversationInfoMenu({ conversationId }: { conversationId: string }) {
 						onClick={() => compactMutation.mutate({ conversationId })}
 					>
 						{isCompacting ? (
-							<ThinkingOrb state="working" size={20} />
+							<span className="loading loading-spinner loading-xs" />
 						) : (
 							<Sparkles size={15} />
 						)}
@@ -388,7 +387,6 @@ function ConversationView({
 						conversationId={conversationId}
 						onConfigureMcp={onConfigureMcp}
 						contextStatus={context.data}
-						onReloadHistory={async () => { await runtime.loadHistory(); }}
 					/>
 				</div>
 			</div>

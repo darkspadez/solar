@@ -1,4 +1,3 @@
-import { OrbLoader as ThinkingOrb } from "./OrbLoader";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Download, Pencil, Trash2, Upload } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -148,7 +147,7 @@ export function Skills({ onClose }: { onClose: () => void }) {
 					</p>
 					{skills.isLoading ? (
 						<div className="flex items-center gap-2 py-8 text-sm opacity-60">
-							<ThinkingOrb state="working" size={20} /> Loading
+							<span className="loading loading-spinner loading-sm" /> Loading
 							skills…
 						</div>
 					) : skills.isError ? (
@@ -239,7 +238,7 @@ export function Skills({ onClose }: { onClose: () => void }) {
 								</div>
 							</div>
 							{selected.isLoading ? (
-								<ThinkingOrb state="working" size={20} />
+								<span className="loading loading-spinner loading-sm" />
 							) : selected.isError ? (
 								<p className="text-sm text-error">
 									{errorMessage(selected.error)}
@@ -261,7 +260,7 @@ export function Skills({ onClose }: { onClose: () => void }) {
 											onClick={() => void save()}
 										>
 											{update.isPending && (
-												<ThinkingOrb state="working" size={20} />
+												<span className="loading loading-spinner loading-xs" />
 											)}
 											Save changes
 										</button>

@@ -18,8 +18,6 @@ import {
 	getModelCapabilities,
 	documentInputMimeTypes,
 	getTaskModel,
-	getSpeechConfig,
-	setSpeechConfig,
 	getTitlePrompt,
 	getUserDefault,
 	getUserDefaultPreset,
@@ -1979,17 +1977,6 @@ const modelRouter = router({
 
 	taskModel: adminProcedure.query(() => getTaskModel()),
 
-	speechConfig: adminProcedure.query(async () => {
-		const config = await getSpeechConfig();
-		return {
-			hasApiKey: Boolean(config.apiKey),
-			baseUrl: config.baseUrl,
-			modelId: config.modelId,
-			transcriptionModel: config.transcriptionModel,
-			voice: config.voice,
-		};
-	}),
-
 	titlePrompt: adminProcedure.query(() => getTitlePrompt()),
 
 	setTitlePrompt: adminProcedure
@@ -2016,20 +2003,6 @@ const modelRouter = router({
 				});
 			}
 			await setTaskModel(input);
-		}),
-
-	setSpeechConfig: adminProcedure
-		.input(
-			z.object({
-				apiKey: z.string().optional(),
-				baseUrl: z.string().min(1),
-				modelId: z.string().min(1),
-				transcriptionModel: z.string().min(1),
-				voice: z.string().min(1),
-			}),
-		)
-		.mutation(async ({ input }) => {
-			await setSpeechConfig(input);
 		}),
 });
 

@@ -403,55 +403,6 @@ export async function setTaskModel(selection: ModelSelection): Promise<void> {
 	await setAppMetaSelection(TASK_MODEL_KEY, selection);
 }
 
-export async function getSpeechConfig(): Promise<{ apiKey: string; baseUrl: string; modelId: string; transcriptionModel: string; voice: string }> {
-	const [apiKeyRow, baseUrlRow, modelIdRow, transModelRow, voiceRow] = await Promise.all([
-		db.selectFrom("app_meta").select("value").where("key", "=", "speech_api_key").executeTakeFirst(),
-		db.selectFrom("app_meta").select("value").where("key", "=", "speech_base_url").executeTakeFirst(),
-		db.selectFrom("app_meta").select("value").where("key", "=", "speech_model_id").executeTakeFirst(),
-		db.selectFrom("app_meta").select("value").where("key", "=", "speech_transcription_model").executeTakeFirst(),
-		db.selectFrom("app_meta").select("value").where("key", "=", "speech_voice").executeTakeFirst(),
-	]);
-	return {
-		apiKey: apiKeyRow?.value ?? "",
-		baseUrl: baseUrlRow?.value ?? "https://api.openai.com/v1",
-		modelId: modelIdRow?.value ?? "gpt-realtime-2.1-mini",
-		transcriptionModel: transModelRow?.value ?? "whisper-1",
-		voice: voiceRow?.value ?? "alloy",
-	};
-}
-
-export async function setSpeechConfig(config: { apiKey?: string; baseUrl: string; modelId: string; transcriptionModel: string; voice: string }): Promise<void> {
-	await db.transaction().execute(async (trx) => {
-		if (config.apiKey !== undefined && config.apiKey !== "") {
-			await trx
-				.insertInto("app_meta")
-				.values({ key: "speech_api_key", value: config.apiKey })
-				.onConflict((oc) => oc.column("key").doUpdateSet({ value: config.apiKey }))
-				.execute();
-		}
-		await trx
-			.insertInto("app_meta")
-			.values({ key: "speech_base_url", value: config.baseUrl })
-			.onConflict((oc) => oc.column("key").doUpdateSet({ value: config.baseUrl }))
-			.execute();
-		await trx
-			.insertInto("app_meta")
-			.values({ key: "speech_model_id", value: config.modelId })
-			.onConflict((oc) => oc.column("key").doUpdateSet({ value: config.modelId }))
-			.execute();
-		await trx
-			.insertInto("app_meta")
-			.values({ key: "speech_transcription_model", value: config.transcriptionModel })
-			.onConflict((oc) => oc.column("key").doUpdateSet({ value: config.transcriptionModel }))
-			.execute();
-		await trx
-			.insertInto("app_meta")
-			.values({ key: "speech_voice", value: config.voice })
-			.onConflict((oc) => oc.column("key").doUpdateSet({ value: config.voice }))
-			.execute();
-	});
-}
-
 export async function getTitlePrompt(): Promise<string> {
 	const row = await db
 		.selectFrom("app_meta")

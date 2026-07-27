@@ -806,8 +806,7 @@ export function useSolarRuntime(
 		return adapter;
 	}, [allowImages, documentMimeTypes, allowDocuments]);
 
-	return Object.assign(
-		useExternalStoreRuntime({
+	return useExternalStoreRuntime({
 		messages,
 		isRunning,
 		convertMessage,
@@ -817,7 +816,5 @@ export function useSolarRuntime(
 		onCancel,
 		queue: messageQueue.adapter,
 		adapters: { attachments: attachmentAdapter },
-		}),
-		{ loadHistory },
-	);
+	});
 }

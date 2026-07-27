@@ -602,112 +602,6 @@ function TaskModel() {
 	);
 }
 
-function SpeechConfig() {
-	const trpc = useTRPC();
-	const qc = useQueryClient();
-	const speechConfig = useQuery(trpc.model.speechConfig.queryOptions());
-
-	const [baseUrl, setBaseUrl] = useState("");
-	const [modelId, setModelId] = useState("");
-	const [apiKey, setApiKey] = useState("");
-	const [transcriptionModel, setTranscriptionModel] = useState("");
-	const [voice, setVoice] = useState("");
-	const [savedConfig, setSavedConfig] = useState("");
-
-	useEffect(() => {
-		if (speechConfig.data) {
-			setBaseUrl(speechConfig.data.baseUrl);
-			setModelId(speechConfig.data.modelId);
-			setTranscriptionModel(speechConfig.data.transcriptionModel);
-			setVoice(speechConfig.data.voice);
-			setSavedConfig(JSON.stringify({ baseUrl: speechConfig.data.baseUrl, modelId: speechConfig.data.modelId, transcriptionModel: speechConfig.data.transcriptionModel, voice: speechConfig.data.voice, hasApiKey: speechConfig.data.hasApiKey }));
-		}
-	}, [speechConfig.data]);
-
-	const setConfig = useMutation(
-		trpc.model.setSpeechConfig.mutationOptions({
-			onSuccess: () => {
-				setApiKey("");
-				qc.invalidateQueries({ queryKey: trpc.model.speechConfig.queryKey() });
-			},
-		}),
-	);
-
-	const currentConfigStr = JSON.stringify({ baseUrl, modelId, transcriptionModel, voice, hasApiKey: apiKey ? true : speechConfig.data?.hasApiKey });
-	const hasChanges = currentConfigStr !== savedConfig;
-
-	return (
-		<section className="card card-border bg-base-100 shadow-sm">
-			<div className="card-body gap-4 p-5">
-				<h3 className="card-title">Speech configuration</h3>
-				<p className="text-sm opacity-70">
-					Used for WebRTC realtime voice transcription and conversational audio. Must be a model supporting the OpenAI Realtime API.
-				</p>
-				<fieldset className="fieldset max-w-lg gap-2">
-					<legend className="fieldset-legend">Base URL</legend>
-					<input
-						className="input w-full"
-						value={baseUrl}
-						onChange={(e) => setBaseUrl(e.target.value)}
-						placeholder="https://api.openai.com/v1"
-					/>
-				</fieldset>
-				<fieldset className="fieldset max-w-lg gap-2">
-					<legend className="fieldset-legend">Model ID</legend>
-					<input
-						className="input w-full"
-						value={modelId}
-						onChange={(e) => setModelId(e.target.value)}
-						placeholder="gpt-realtime-2.1-mini"
-					/>
-				</fieldset>
-				<fieldset className="fieldset max-w-lg gap-2">
-					<legend className="fieldset-legend">Transcription Model</legend>
-					<input
-						className="input w-full"
-						value={transcriptionModel}
-						onChange={(e) => setTranscriptionModel(e.target.value)}
-						placeholder="whisper-1"
-					/>
-				</fieldset>
-				<fieldset className="fieldset max-w-lg gap-2">
-					<legend className="fieldset-legend">Voice</legend>
-					<input
-						className="input w-full"
-						value={voice}
-						onChange={(e) => setVoice(e.target.value)}
-						placeholder="alloy"
-					/>
-				</fieldset>
-				<fieldset className="fieldset max-w-lg gap-2">
-					<legend className="fieldset-legend">API Key</legend>
-					<input
-						type="password"
-						className="input w-full"
-						value={apiKey}
-						onChange={(e) => setApiKey(e.target.value)}
-						placeholder={speechConfig.data?.hasApiKey ? "••••••••••••••••" : "sk-..."}
-					/>
-				</fieldset>
-				<div className="card-actions items-center justify-end">
-					<button
-						className="btn btn-primary"
-						disabled={!hasChanges || setConfig.isPending || !baseUrl || !modelId || !transcriptionModel || !voice || (!speechConfig.data?.hasApiKey && !apiKey)}
-						onClick={() => setConfig.mutate({ baseUrl, modelId, transcriptionModel, voice, apiKey: apiKey || undefined })}
-					>
-						{setConfig.isPending ? "Saving…" : "Save configuration"}
-					</button>
-				</div>
-				{setConfig.isError && (
-					<div role="alert" className="alert alert-error alert-soft">
-						{setConfig.error?.message}
-					</div>
-				)}
-			</div>
-		</section>
-	);
-}
-
 function ProviderCard({ initial }: { initial: ProviderForm }) {
 	const trpc = useTRPC();
 	const qc = useQueryClient();
@@ -1945,7 +1839,6 @@ const sections = [
 	"api keys",
 	"providers",
 	"task model",
-	"speech model",
 	"paste handling",
 	"usage",
 	"logging",
@@ -2007,7 +1900,6 @@ export function Settings({ onClose }: { onClose: () => void }) {
 						{section === "usage" && <Usage />}
 						{section === "logging" && <Logging />}
 						{section === "task model" && <TaskModel />}
-						{section === "speech model" && <SpeechConfig />}
 						{section === "paste handling" && <PasteHandling />}
 						{section === "providers" && providers.isError && (
 							<div role="alert" className="alert alert-error alert-soft">

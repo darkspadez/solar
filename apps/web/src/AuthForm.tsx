@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { OrbLoader as ThinkingOrb } from "./chat/OrbLoader";
 import { signIn } from "./auth";
 import { useGoogleAuthEnabled } from "./authProviders";
 import { ThemeToggle } from "./ThemeToggle";
@@ -80,7 +79,7 @@ export function AuthForm() {
 								disabled={busy}
 							>
 								{busy && (
-									<ThinkingOrb state="working" size={20} />
+									<span className="loading loading-spinner loading-sm" />
 								)}
 								Continue with Google
 							</button>
