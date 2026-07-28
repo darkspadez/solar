@@ -45,7 +45,7 @@ describe("chat-v2 M6 attachments, projections, search, and organization", () => 
 		for (const binding of await repository.listMessageAttachments(USER_A, CONVERSATION_ID))
 			byMessage.set(binding.messageId, [...(byMessage.get(binding.messageId) ?? []), binding.attachment]);
 		const turns = projectVisibleTurns(await repository.listCanonicalMessages(USER_A, CONVERSATION_ID), byMessage);
-		expect(turns.map((turn) => turn.displayText)).toEqual(["What is the weather?", "20 C and clear\nIt is 20 C and clear in Austin."]);
+		expect(turns.map((turn) => turn.displayText)).toEqual(["What is the weather?", "It is 20 C and clear in Austin."]);
 		expect(turns[0]?.attachments).toEqual([{ id: "image", filename: "photo.png", mimeType: "image/png", kind: "image", byteSize: 8, storageKey: "uploads/image" }]);
 		expect(turns[1]?.messages.map((message) => message.role)).toEqual(["assistant", "toolResult", "assistant"]);
 	});

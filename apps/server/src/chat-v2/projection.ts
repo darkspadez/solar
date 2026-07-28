@@ -67,7 +67,7 @@ export function projectVisibleTurns(
 				origin: record.origin,
 				status: record.status,
 				messages: [record],
-				displayText: displayText(record.message),
+				displayText: record.message.role === "toolResult" ? "" : displayText(record.message),
 				reasoning: reasoning(record.message),
 				attachments: attachmentReferences(attachmentsByMessageId.get(record.id) ?? []),
 			});
@@ -76,8 +76,12 @@ export function projectVisibleTurns(
 		if (current.role !== role)
 			throw new Error(`visible turn ${record.turnId} mixes user and assistant messages`);
 		current.messages.push(record);
-		const text = displayText(record.message);
-		if (text) current.displayText = [current.displayText, text].filter(Boolean).join("\n");
+		// Tool results carry raw tool output (e.g. full search-result payloads),
+		// not user-facing reply text — never fold them into the visible turn text.
+		if (record.message.role !== "toolResult") {
+			const text = displayText(record.message);
+			if (text) current.displayText = [current.displayText, text].filter(Boolean).join("\n");
+		}
 		current.reasoning.push(...reasoning(record.message));
 		current.attachments.push(...attachmentReferences(attachmentsByMessageId.get(record.id) ?? []));
 	}

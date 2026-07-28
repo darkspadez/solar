@@ -81,6 +81,7 @@ export async function* streamChat(
 	let turnContext = context;
 	let toolStepsCompleted = false;
 	let accumulatedText = "";
+	let accumulatedThinking = "";
 	while (true) {
 		const startedAt = Date.now();
 		let message: AssistantMessage | undefined;
@@ -88,6 +89,7 @@ export async function* streamChat(
 		let error: unknown;
 		let outputStarted = false;
 		let newTurnTextStarted = false;
+		let newTurnThinkingStarted = false;
 		try {
 			const events = streamModel(resolved, turnContext, signal, params);
 			for await (const event of events) {
@@ -150,6 +152,34 @@ export async function* streamChat(
 						}
 					}
 					accumulatedText += event.delta;
+				}
+				if (event.type === "thinking_delta") {
+					// Each tool-loop turn streams its own reasoning summary; separate
+					// them with a blank line instead of letting one turn's summary run
+					// straight into the next's (they'd otherwise render as one
+					// duplicated, run-on paragraph in the reasoning UI).
+					if (
+						toolStepsCompleted &&
+						!newTurnThinkingStarted &&
+						accumulatedThinking.length > 0
+					) {
+						newTurnThinkingStarted = true;
+						const padding = accumulatedThinking.endsWith("\n\n")
+							? ""
+							: accumulatedThinking.endsWith("\n")
+								? "\n"
+								: "\n\n";
+						if (padding) {
+							accumulatedThinking += padding;
+							yield {
+								type: "thinking_delta",
+								contentIndex: event.contentIndex,
+								delta: padding,
+								partial: event.partial,
+							};
+						}
+					}
+					accumulatedThinking += event.delta;
 				}
 				yield event;
 				if (event.type !== "start") outputStarted = true;

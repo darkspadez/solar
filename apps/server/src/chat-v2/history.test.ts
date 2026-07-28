@@ -144,6 +144,6 @@ describe("chat-v2 canonical history", () => {
 			"toolResult",
 			"assistant",
 		]);
-		expect(turns[1]?.displayText).toBe("20 C and clear\nIt is 20 C and clear in Austin.");
+		expect(turns[1]?.displayText).toBe("It is 20 C and clear in Austin.");
 	});
 });
