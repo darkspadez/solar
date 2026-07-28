@@ -96,4 +96,48 @@ describe("chat-v2 M6 attachments, projections, search, and organization", () => 
 		await repository.deleteConversation(USER_A, CONVERSATION_ID);
 		expect(await database.db.selectFrom("v2_conversation_tag").selectAll().execute()).toEqual([]);
 	});
+
+	test("lists, renames, and deletes folders and tags scoped to their owner", async () => {
+		const { repository } = await setup();
+		const folder = await repository.createFolder(USER_A, { name: "Work" });
+		await repository.createFolder(USER_B, { name: "Private" });
+		const tag = await repository.createTag(USER_A, { name: "urgent" });
+		await repository.createTag(USER_B, { name: "private" });
+
+		expect(await repository.listFolders(USER_A)).toEqual([
+			expect.objectContaining({ id: folder.id, name: "Work" }),
+		]);
+		expect(await repository.listTags(USER_A)).toEqual([
+			expect.objectContaining({ id: tag.id, name: "urgent" }),
+		]);
+		expect(await repository.findTagByName(USER_A, "urgent")).toMatchObject({ id: tag.id });
+		expect(await repository.findTagByName(USER_A, "missing")).toBeUndefined();
+
+		await repository.renameFolder(USER_A, folder.id, "Renamed folder");
+		expect(await repository.listFolders(USER_A)).toEqual([
+			expect.objectContaining({ name: "Renamed folder" }),
+		]);
+		await expect(
+			repository.renameFolder(USER_B, folder.id, "Hijacked"),
+		).rejects.toBeInstanceOf(V2NotFoundError);
+
+		await repository.createConversation(USER_A, {
+			id: "folder-conversation",
+			title: "In a folder",
+			folderId: null,
+		});
+		await repository.setConversationFolder(USER_A, "folder-conversation", folder.id);
+		await repository.deleteFolder(USER_A, folder.id);
+		expect(await repository.listFolders(USER_A)).toEqual([]);
+		expect(
+			(await repository.getConversation(USER_A, "folder-conversation")).folderId,
+		).toBeNull();
+		await expect(
+			repository.deleteFolder(USER_B, tag.id),
+		).rejects.toBeInstanceOf(V2NotFoundError);
+
+		await expect(repository.deleteTag(USER_B, tag.id)).rejects.toBeInstanceOf(V2NotFoundError);
+		await repository.deleteTag(USER_A, tag.id);
+		expect(await repository.listTags(USER_A)).toEqual([]);
+	});
 });

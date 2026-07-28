@@ -13,32 +13,58 @@ mock.module("../db", () => ({ db: database.db }));
 mock.module("./catalog", () => ({
 	MOCK: true,
 	resolveSelection: async () => ({
-		provider: "mock",
-		endpointId: "mock",
-		modelId: "mock",
-		api: "mock",
+		provider: "acme",
+		endpointId: "acme-default",
+		modelId: "acme-model",
+		api: "openai-responses",
 	}),
 	resolveTaskModelOrFallback: async (selection: unknown) => selection,
-	resolveModel: async () => {
-		throw new Error("resolveModel should not be called when MOCK is true");
-	},
+	// A tight, always-triggering policy so this test can assert wiring
+	// (enqueue + run happen synchronously after persist) without depending
+	// on real token thresholds, which are covered by compactionScheduler.test.ts.
+	resolveModel: async () => ({
+		model: { contextWindow: 128_000 },
+		contextPolicy: {
+			enabled: true,
+			softTriggerTokens: 0,
+			targetTokens: 0,
+			hardInputTokens: 0,
+			maxPinnedAttachmentTokens: 0,
+			outputReserveTokens: 0,
+		},
+	}),
 	streamModel: () => {
-		throw new Error("streamModel should not be called when MOCK is true");
+		throw new Error("streamModel should not be called in this test");
 	},
+	getModelCapabilities: async () => ({
+		reasoningLevels: [],
+		supportsVerbosity: false,
+		defaultReasoningEffort: null,
+		defaultVerbosity: null,
+	}),
+	getTitlePrompt: async () => "{{first_message}}",
+	documentInputCapabilities: async () => ({ nativeMimeTypes: [], extractedTextMimeTypes: [] }),
+	listAvailableModels: async () => [],
 }));
+mock.module("./tools", () => ({ toolProvider: { resolve: async () => [] } }));
+mock.module("./attachments", () => ({
+	expandAttachmentRows: async () => ({ parts: [], documents: [] }),
+	deleteAttachmentFilesByStorageKey: async () => {},
+}));
+mock.module("./builtins", () => ({ renderBuiltinPromptInterpolations: (prompt: string | null) => prompt }));
 
-let persistExternally: ((result: { parts: unknown; status: string; text: string }) => Promise<void>) | undefined;
+let generationOptions: { persist?: (result: { steps: unknown[]; parts: unknown; status: string; text: string }) => Promise<void> } | undefined;
 mock.module("./generationManager", () => ({
 	generationManager: {
-		start: (opts: { persistExternally?: typeof persistExternally }) => {
-			persistExternally = opts.persistExternally;
+		start: (opts: typeof generationOptions) => {
+			generationOptions = opts;
 		},
 		isActive: () => false,
 		stop: () => false,
 	},
 }));
 
-const { chatV2Repository, sendV2Message } = await import("./v2Live");
+const { chatV2Repository, sendMessage } = await import("./v2Live");
 
 function assistant(text: string): AssistantMessage {
 	return {
@@ -96,15 +122,16 @@ describe("chat-v2 live compaction wiring", () => {
 			}]);
 		}
 
-		await sendV2Message({
+		await sendMessage({
 			userId: USER_ID,
 			isAdmin: false,
 			conversationId,
 			text: "third question",
 		});
 
-		expect(persistExternally).toBeFunction();
-		await persistExternally!({
+		expect(generationOptions?.persist).toBeFunction();
+		await generationOptions!.persist!({
+			steps: [],
 			parts: assistant("third answer"),
 			status: "complete",
 			text: "third answer",

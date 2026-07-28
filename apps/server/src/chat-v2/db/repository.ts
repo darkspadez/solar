@@ -46,11 +46,16 @@ export class V2StaleTargetError extends Error {
 export interface CreateConversationInput {
 	id?: string;
 	title: string;
+	folderId?: string | null;
 	provider?: string | null;
 	endpointId?: string | null;
 	modelId?: string | null;
 	modelApi?: string | null;
 	systemPrompt?: string | null;
+	reasoningEffort?: string | null;
+	reasoningSummary?: boolean;
+	verbosity?: string | null;
+	displayMode?: string | null;
 	generationConfigJson?: string;
 	createdAt?: string;
 }
@@ -213,13 +218,49 @@ export class ChatV2Repository {
 			modelId: input.modelId ?? null,
 			modelApi: input.modelApi ?? null,
 			systemPrompt: input.systemPrompt ?? null,
+			reasoningEffort: input.reasoningEffort ?? null,
+			reasoningSummary: input.reasoningSummary ? 1 : 0,
+			verbosity: input.verbosity ?? null,
+			displayMode: input.displayMode ?? null,
 			generationConfigJson: input.generationConfigJson ?? "{}",
 			createdAt,
 			updatedAt: createdAt,
-			folderId: null,
+			folderId: input.folderId ?? null,
 		};
 		await this.db.insertInto("v2_conversation").values(record).execute();
 		return this.requireConversation(this.db, userId, record.id);
+	}
+
+	/** Deletes attachment metadata rows (already-validated as orphaned by the
+	 * caller) and returns their storage keys so the caller can free the
+	 * on-disk objects. */
+	async deleteAttachments(attachmentIds: readonly string[]): Promise<string[]> {
+		if (attachmentIds.length === 0) return [];
+		const rows = await this.db
+			.selectFrom("v2_attachment")
+			.select("storageKey")
+			.where("id", "in", attachmentIds)
+			.execute();
+		await this.db
+			.deleteFrom("v2_attachment")
+			.where("id", "in", attachmentIds)
+			.execute();
+		return rows.map((row) => row.storageKey);
+	}
+
+	async setConversationTitleIfDefault(
+		userId: string,
+		conversationId: string,
+		title: string,
+	): Promise<boolean> {
+		const result = await this.db
+			.updateTable("v2_conversation")
+			.set({ title, updatedAt: now() })
+			.where("id", "=", conversationId)
+			.where("userId", "=", userId)
+			.where("title", "=", "New conversation")
+			.executeTakeFirst();
+		return (result.numUpdatedRows ?? 0n) > 0n;
 	}
 
 	async createAttachment(
@@ -334,6 +375,44 @@ export class ChatV2Repository {
 		return record;
 	}
 
+	async listFolders(userId: string) {
+		return this.db
+			.selectFrom("v2_folder")
+			.select(["id", "name", "createdAt"])
+			.where("userId", "=", userId)
+			.orderBy("name", "asc")
+			.execute();
+	}
+
+	async renameFolder(userId: string, folderId: string, name: string): Promise<void> {
+		const result = await this.db
+			.updateTable("v2_folder")
+			.set({ name })
+			.where("id", "=", folderId)
+			.where("userId", "=", userId)
+			.executeTakeFirst();
+		if ((result.numUpdatedRows ?? 0n) === 0n)
+			throw new V2NotFoundError("folder", folderId);
+	}
+
+	async deleteFolder(userId: string, folderId: string): Promise<void> {
+		await this.db.transaction().execute(async (trx) => {
+			const result = await trx
+				.deleteFrom("v2_folder")
+				.where("id", "=", folderId)
+				.where("userId", "=", userId)
+				.executeTakeFirst();
+			if ((result.numDeletedRows ?? 0n) === 0n)
+				throw new V2NotFoundError("folder", folderId);
+			await trx
+				.updateTable("v2_conversation")
+				.set({ folderId: null })
+				.where("folderId", "=", folderId)
+				.where("userId", "=", userId)
+				.execute();
+		});
+	}
+
 	async createTag(userId: string, input: CreateOrganizationInput) {
 		const record = {
 			id: input.id ?? id(),
@@ -343,6 +422,34 @@ export class ChatV2Repository {
 		};
 		await this.db.insertInto("v2_tag").values(record).execute();
 		return record;
+	}
+
+	async findTagByName(userId: string, name: string) {
+		return this.db
+			.selectFrom("v2_tag")
+			.select("id")
+			.where("userId", "=", userId)
+			.where("name", "=", name)
+			.executeTakeFirst();
+	}
+
+	async listTags(userId: string) {
+		return this.db
+			.selectFrom("v2_tag")
+			.select(["id", "name", "createdAt"])
+			.where("userId", "=", userId)
+			.orderBy("name", "asc")
+			.execute();
+	}
+
+	async deleteTag(userId: string, tagId: string): Promise<void> {
+		const result = await this.db
+			.deleteFrom("v2_tag")
+			.where("id", "=", tagId)
+			.where("userId", "=", userId)
+			.executeTakeFirst();
+		if ((result.numDeletedRows ?? 0n) === 0n)
+			throw new V2NotFoundError("tag", tagId);
 	}
 
 	async renameConversation(
@@ -394,6 +501,118 @@ export class ChatV2Repository {
 		});
 	}
 
+	async setConversationModel(
+		userId: string,
+		conversationId: string,
+		selection: {
+			provider: string;
+			endpointId: string;
+			modelId: string;
+			modelApi: string;
+		},
+	): Promise<void> {
+		await this.requireConversation(this.db, userId, conversationId);
+		await this.db
+			.updateTable("v2_conversation")
+			.set({
+				provider: selection.provider,
+				endpointId: selection.endpointId,
+				modelId: selection.modelId,
+				modelApi: selection.modelApi,
+				updatedAt: now(),
+			})
+			.where("id", "=", conversationId)
+			.execute();
+	}
+
+	async setConversationGenerationSettings(
+		userId: string,
+		conversationId: string,
+		settings: {
+			reasoningEffort?: string | null;
+			verbosity?: string | null;
+			reasoningSummary?: boolean;
+		},
+	): Promise<void> {
+		await this.requireConversation(this.db, userId, conversationId);
+		await this.db
+			.updateTable("v2_conversation")
+			.set({
+				...(settings.reasoningEffort !== undefined
+					? { reasoningEffort: settings.reasoningEffort }
+					: {}),
+				...(settings.verbosity !== undefined
+					? { verbosity: settings.verbosity }
+					: {}),
+				...(settings.reasoningSummary !== undefined
+					? { reasoningSummary: settings.reasoningSummary ? 1 : 0 }
+					: {}),
+				updatedAt: now(),
+			})
+			.where("id", "=", conversationId)
+			.execute();
+	}
+
+	async setConversationDisplayMode(
+		userId: string,
+		conversationId: string,
+		displayMode: string,
+	): Promise<void> {
+		await this.requireConversation(this.db, userId, conversationId);
+		await this.db
+			.updateTable("v2_conversation")
+			.set({ displayMode, updatedAt: now() })
+			.where("id", "=", conversationId)
+			.execute();
+	}
+
+	async setConversationAutoExecuteTools(
+		userId: string,
+		conversationId: string,
+		enabled: boolean,
+	): Promise<void> {
+		await this.requireConversation(this.db, userId, conversationId);
+		await this.db
+			.updateTable("v2_conversation")
+			.set({ autoExecuteTools: enabled ? 1 : 0, updatedAt: now() })
+			.where("id", "=", conversationId)
+			.execute();
+	}
+
+	async setConversationMcpServer(
+		userId: string,
+		conversationId: string,
+		serverId: string,
+		enabled: boolean,
+	): Promise<void> {
+		await this.requireConversation(this.db, userId, conversationId);
+		await this.db
+			.insertInto("v2_conversation_mcp_server")
+			.values({ conversationId, serverId, enabled: enabled ? 1 : 0 })
+			.onConflict((oc) =>
+				oc
+					.columns(["conversationId", "serverId"])
+					.doUpdateSet({ enabled: enabled ? 1 : 0 }),
+			)
+			.execute();
+	}
+
+	async listConversationMcpServers(
+		userId: string,
+		conversationId: string,
+	): Promise<{ serverId: string; enabled: boolean }[]> {
+		await this.requireConversation(this.db, userId, conversationId);
+		const rows = await this.db
+			.selectFrom("v2_conversation_mcp_server")
+			.select(["serverId", "enabled"])
+			.where("conversationId", "=", conversationId)
+			.execute();
+		return rows.map((row) => ({
+			serverId: row.serverId,
+			enabled: Boolean(row.enabled),
+		}));
+	}
+
 	async listConversations(userId: string): Promise<ConversationListRecord[]> {
 		const conversations = await this.db
 			.selectFrom("v2_conversation")
@@ -431,6 +650,39 @@ export class ChatV2Repository {
 		await this.db
 			.deleteFrom("v2_conversation")
 			.where("id", "=", conversationId)
+			.execute();
+	}
+
+	/** Discards the user's abandoned drafts (conversations with no turns at
+	 * all) so they never accumulate. */
+	async deleteAbandonedConversations(userId: string): Promise<void> {
+		const abandoned = await this.db
+			.selectFrom("v2_conversation as conversation")
+			.select("conversation.id")
+			.where("conversation.userId", "=", userId)
+			.where((eb) =>
+				eb.not(
+					eb.exists(
+						eb
+							.selectFrom("v2_conversation_turn")
+							.select("v2_conversation_turn.id")
+							.whereRef(
+								"v2_conversation_turn.conversationId",
+								"=",
+								"conversation.id",
+							),
+					),
+				),
+			)
+			.execute();
+		if (abandoned.length === 0) return;
+		await this.db
+			.deleteFrom("v2_conversation")
+			.where(
+				"id",
+				"in",
+				abandoned.map((row) => row.id),
+			)
 			.execute();
 	}
 
@@ -499,7 +751,13 @@ export class ChatV2Repository {
 					messages,
 				),
 			);
-		if (appended.length) logger.withMetadata({ conversationId, messageIds: appended.map((message) => message.id) }).debug("chat-v2 canonical messages appended");
+		if (appended.length)
+			logger
+				.withMetadata({
+					conversationId,
+					messageIds: appended.map((message) => message.id),
+				})
+				.debug("chat-v2 canonical messages appended");
 		return appended;
 	}
 
@@ -522,7 +780,9 @@ export class ChatV2Repository {
 				.where("ordinal", ">=", fromOrdinal)
 				.execute();
 		});
-		logger.withMetadata({ conversationId, fromOrdinal }).debug("chat-v2 message suffix deleted");
+		logger
+			.withMetadata({ conversationId, fromOrdinal })
+			.debug("chat-v2 message suffix deleted");
 	}
 
 	async deleteConversationSuffix(
@@ -733,13 +993,24 @@ export class ChatV2Repository {
 			finishedAt?: string;
 		},
 	): Promise<boolean> {
-		const generation = await this.requireGeneration(this.db, userId, generationId);
+		const generation = await this.requireGeneration(
+			this.db,
+			userId,
+			generationId,
+		);
 		const completed = await this.db
 			.transaction()
 			.execute((trx) =>
 				this.completeGenerationInTransaction(trx, userId, generationId, input),
 			);
-		if (completed) logger.withMetadata({ conversationId: generation.conversationId, turnId: generation.turnId ?? undefined, generationId }).info("chat-v2 generation completed");
+		if (completed)
+			logger
+				.withMetadata({
+					conversationId: generation.conversationId,
+					turnId: generation.turnId ?? undefined,
+					generationId,
+				})
+				.info("chat-v2 generation completed");
 		return completed;
 	}
 
@@ -916,6 +1187,23 @@ export class ChatV2Repository {
 
 	async getTurn(userId: string, turnId: string) {
 		return this.requireTurn(this.db, userId, turnId);
+	}
+
+	/** Assistant-ui's reload passes an assistant message's *parent* id, which is
+	 * the preceding user turn, not the assistant turn itself. Resolve that user
+	 * turn to the assistant turn immediately following it (ordinal + 1). */
+	async getAssistantTurnForUserTurn(userId: string, userTurnId: string) {
+		const userTurn = await this.requireTurn(this.db, userId, userTurnId);
+		const assistantTurn = await this.db
+			.selectFrom("v2_conversation_turn")
+			.selectAll()
+			.where("conversationId", "=", userTurn.conversationId)
+			.where("ordinal", "=", userTurn.ordinal + 1)
+			.where("role", "=", "assistant")
+			.executeTakeFirst();
+		if (!assistantTurn)
+			throw new V2NotFoundError("turn", userTurnId);
+		return assistantTurn;
 	}
 
 	async getMessage(userId: string, messageId: string) {
@@ -1146,7 +1434,16 @@ export class ChatV2Repository {
 				.execute();
 			return record;
 		});
-		logger.withMetadata({ compactionId: result === "stale" ? undefined : result.id, conversationId: result === "stale" ? undefined : result.conversationId }).info(result === "stale" ? "chat-v2 compaction stale" : "chat-v2 compaction materialized");
+		logger
+			.withMetadata({
+				compactionId: result === "stale" ? undefined : result.id,
+				conversationId: result === "stale" ? undefined : result.conversationId,
+			})
+			.info(
+				result === "stale"
+					? "chat-v2 compaction stale"
+					: "chat-v2 compaction materialized",
+			);
 		return result;
 	}
 
@@ -1184,6 +1481,32 @@ export class ChatV2Repository {
 			.executeTakeFirst();
 		if (!record) throw new V2NotFoundError("generation", turnId);
 		return record;
+	}
+
+	/** Removes an attachment only if it has never been bound to a message
+	 * (composer's "remove attachment before sending" action). */
+	async removeOrphanAttachment(
+		userId: string,
+		attachmentId: string,
+	): Promise<{ removed: boolean; storageKey?: string }> {
+		const attachment = await this.db
+			.selectFrom("v2_attachment")
+			.select(["id", "storageKey"])
+			.where("id", "=", attachmentId)
+			.where("userId", "=", userId)
+			.executeTakeFirst();
+		if (!attachment) return { removed: false };
+		const binding = await this.db
+			.selectFrom("v2_message_attachment")
+			.select("attachmentId")
+			.where("attachmentId", "=", attachmentId)
+			.executeTakeFirst();
+		if (binding) return { removed: false };
+		await this.db
+			.deleteFrom("v2_attachment")
+			.where("id", "=", attachmentId)
+			.execute();
+		return { removed: true, storageKey: attachment.storageKey };
 	}
 
 	async getAttachment(userId: string, attachmentId: string) {

@@ -1,8 +1,7 @@
 import { beforeEach, describe, expect, mock, test } from "bun:test";
 
-const updates: Array<{ table: string; values: Record<string, unknown> }> = [];
-const generationSteps: Array<{ messageId: string; steps: unknown[] }> = [];
-const providerCalls: Array<Record<string, unknown>> = [];
+const providerCallInserts: Array<Record<string, unknown>> = [];
+const persisted: Array<{ steps: unknown[]; parts: unknown; status: string; text: string }> = [];
 let streamFactory: (...args: any[]) => AsyncIterable<any>;
 let titleFactory: (...args: any[]) => Promise<string>;
 let persistStarted: Promise<void> | null = null;
@@ -13,28 +12,14 @@ let notifyPersistFinished: (() => void) | null = null;
 
 mock.module("../db", () => ({
 	db: {
-		updateTable(table: string) {
+		insertInto(table: string) {
 			const query = {
-				set(values: Record<string, unknown>) {
-					updates.push({ table, values });
+				values(values: Record<string, unknown>) {
+					if (table === "provider_call_telemetry")
+						providerCallInserts.push(values);
 					return query;
 				},
-				where() {
-					return query;
-				},
-				execute: async () => {
-					if (notifyPersistStarted && persistGate) {
-						const notify = notifyPersistStarted;
-						const gate = persistGate;
-						notifyPersistStarted = null;
-						persistGate = null;
-						notify();
-						await gate;
-						notifyPersistFinished?.();
-						notifyPersistFinished = null;
-					}
-				},
-				executeTakeFirst: async () => ({ numUpdatedRows: 0n }),
+				execute: async () => undefined,
 			};
 			return query;
 		},
@@ -51,18 +36,6 @@ const log = {
 };
 
 mock.module("../logger", () => ({ logger: log }));
-mock.module("../context/repository", () => ({
-	ContextRepository: class {
-		recordGenerationSteps(messageId: string, steps: unknown[]) {
-			generationSteps.push({ messageId, steps });
-			return Promise.resolve();
-		}
-		recordProviderCall(call: Record<string, unknown>) {
-			providerCalls.push(call);
-			return Promise.resolve();
-		}
-	},
-}));
 mock.module("./models", () => ({
 	streamChat: (...args: any[]) => streamFactory(...args),
 	generateTitle: (...args: any[]) => titleFactory(...args),
@@ -101,9 +74,29 @@ async function* events(...values: any[]): AsyncGenerator<any> {
 	yield* values;
 }
 
+async function persistCall(result: {
+	steps: unknown[];
+	parts: unknown;
+	status: string;
+	text: string;
+}): Promise<void> {
+	if (notifyPersistStarted && persistGate) {
+		const notify = notifyPersistStarted;
+		const gate = persistGate;
+		notifyPersistStarted = null;
+		persistGate = null;
+		notify();
+		await gate;
+		notifyPersistFinished?.();
+		notifyPersistFinished = null;
+	}
+	persisted.push(result);
+}
+
 function start(
 	manager: InstanceType<typeof GenerationManager>,
 	messageId = "message-1",
+	overrides: Partial<Parameters<InstanceType<typeof GenerationManager>["start"]>[0]> = {},
 ): void {
 	manager.start({
 		conversationId: "conversation-1",
@@ -116,6 +109,8 @@ function start(
 			api: "test",
 		},
 		params: {} as never,
+		persist: persistCall,
+		...overrides,
 	});
 }
 
@@ -127,9 +122,8 @@ const doneEvent = {
 
 describe("GenerationManager SSE lifecycle", () => {
 	beforeEach(() => {
-		updates.length = 0;
-		generationSteps.length = 0;
-		providerCalls.length = 0;
+		persisted.length = 0;
+		providerCallInserts.length = 0;
 		streamFactory = () => events();
 		titleFactory = async () => "";
 		persistStarted = null;
@@ -165,20 +159,12 @@ describe("GenerationManager SSE lifecycle", () => {
 			{ data: "[DONE]" },
 		]);
 		expect(manager.isActive("message-1")).toBe(false);
-		expect(updates).toEqual(
-			expect.arrayContaining([
-				expect.objectContaining({
-					table: "message",
-					values: expect.objectContaining({
-						text: "Hello",
-						status: "complete",
-					}),
-				}),
-			]),
-		);
+		expect(persisted).toEqual([
+			expect.objectContaining({ status: "complete", text: "Hello" }),
+		]);
 	});
 
-	test("delegates persistence without writing the v1 message table", async () => {
+	test("delegates persistence entirely to the caller-provided callback", async () => {
 		streamFactory = () =>
 			events(
 				{ type: "text_delta", delta: "v2 response" },
@@ -191,29 +177,13 @@ describe("GenerationManager SSE lifecycle", () => {
 					},
 				},
 			);
-		const persisted: unknown[] = [];
 		const manager = new GenerationManager();
-		manager.start({
-			conversationId: "conversation-1",
-			messageId: "v2-turn",
-			context: {} as never,
-			selection: {
-				provider: "test",
-				endpointId: "test",
-				modelId: "model",
-				api: "test",
-			},
-			params: {} as never,
-			persistExternally: async (result) => {
-				persisted.push(result);
-			},
-		});
+		start(manager, "v2-turn");
 
 		await readEvents(manager.subscribe("v2-turn"));
 		expect(persisted).toEqual([
 			expect.objectContaining({ status: "complete", text: "v2 response" }),
 		]);
-		expect(updates).toEqual([]);
 	});
 
 	test("persists streamed reasoning when the final provider message omits it", async () => {
@@ -236,8 +206,7 @@ describe("GenerationManager SSE lifecycle", () => {
 		start(manager);
 		await readEvents(manager.subscribe("message-1"));
 
-		const messageUpdate = updates.find((update) => update.table === "message");
-		const parts = JSON.parse(String(messageUpdate?.values.parts));
+		const parts = persisted[0]?.parts as { content: unknown[] };
 		expect(parts.content).toEqual([
 			{ type: "thinking", thinking: "First second" },
 			{ type: "text", text: "Answer" },
@@ -346,17 +315,9 @@ describe("GenerationManager SSE lifecycle", () => {
 			},
 			{ data: "[DONE]" },
 		]);
-		expect(updates).toEqual(
-			expect.arrayContaining([
-				expect.objectContaining({
-					table: "message",
-					values: expect.objectContaining({
-						text: "Partial",
-						status: "complete",
-					}),
-				}),
-			]),
-		);
+		expect(persisted).toEqual([
+			expect.objectContaining({ status: "complete", text: "Partial" }),
+		]);
 	});
 
 	test("emits an error chunk, closes subscribers, and persists failure state", async () => {
@@ -375,20 +336,15 @@ describe("GenerationManager SSE lifecycle", () => {
 			{ id: 3, data: { type: "error", errorText: "provider unavailable" } },
 			{ data: "[DONE]" },
 		]);
-		expect(updates).toEqual(
-			expect.arrayContaining([
-				expect.objectContaining({
-					table: "message",
-					values: expect.objectContaining({
-						text: "Partial\n\n**Error:** provider unavailable",
-						status: "error",
-					}),
-				}),
-			]),
-		);
+		expect(persisted).toEqual([
+			expect.objectContaining({
+				status: "error",
+				text: "Partial\n\n**Error:** provider unavailable",
+			}),
+		]);
 	});
 
-	test("persists native tool-loop steps and every provider call while aggregating usage", async () => {
+	test("passes native tool-loop steps to persist and records every provider call while aggregating usage", async () => {
 		streamFactory = async function* (
 			_context,
 			_selection,
@@ -450,16 +406,15 @@ describe("GenerationManager SSE lifecycle", () => {
 		start(manager);
 		await readEvents(manager.subscribe("message-1"));
 
-		expect(generationSteps).toEqual([
-			{
-				messageId: "message-1",
+		expect(persisted).toEqual([
+			expect.objectContaining({
 				steps: [
 					expect.objectContaining({ role: "assistant" }),
 					expect.objectContaining({ role: "toolResult" }),
 				],
-			},
+			}),
 		]);
-		expect(providerCalls).toEqual([
+		expect(providerCallInserts).toEqual([
 			expect.objectContaining({
 				purpose: "chat",
 				inputTokens: 3,
@@ -473,17 +428,6 @@ describe("GenerationManager SSE lifecycle", () => {
 				latencyMs: 12,
 			}),
 		]);
-		expect(updates).toEqual(
-			expect.arrayContaining([
-				expect.objectContaining({
-					table: "message",
-					values: expect.objectContaining({
-						inputTokens: 10,
-						outputTokens: 16,
-					}),
-				}),
-			]),
-		);
 	});
 
 	test("records title calls with their originating conversation and message", async () => {
@@ -503,18 +447,9 @@ describe("GenerationManager SSE lifecycle", () => {
 		};
 		streamFactory = () => events(doneEvent);
 		const manager = new GenerationManager();
+		const persistedTitles: (string | undefined)[] = [];
 
-		manager.start({
-			conversationId: "conversation-1",
-			messageId: "message-1",
-			context: {} as never,
-			selection: {
-				provider: "test",
-				endpointId: "test",
-				modelId: "model",
-				api: "test",
-			},
-			params: {} as never,
+		start(manager, "message-1", {
 			titleGeneration: {
 				firstMessage: "Hello",
 				prompt: "{{first_message}}",
@@ -524,11 +459,16 @@ describe("GenerationManager SSE lifecycle", () => {
 					modelId: "title-model",
 					api: "test",
 				},
+				persistTitle: async (title) => {
+					persistedTitles.push(title);
+					return true;
+				},
 			},
 		});
 		await readEvents(manager.subscribe("message-1"));
 
-		expect(providerCalls).toEqual(
+		expect(persistedTitles).toEqual(["A title"]);
+		expect(providerCallInserts).toEqual(
 			expect.arrayContaining([
 				expect.objectContaining({
 					purpose: "title",
@@ -576,26 +516,16 @@ describe("GenerationManager SSE lifecycle", () => {
 		start(manager);
 		await readEvents(manager.subscribe("message-1"));
 
-		expect(providerCalls).toEqual([
+		expect(providerCallInserts).toEqual([
 			expect.objectContaining({
-				overflowed: true,
+				overflowed: 1,
 				cacheReadTokens: 4,
 				cacheWriteTokens: 2,
 			}),
 		]);
-		expect(providerCalls[0]).not.toHaveProperty("error");
-		expect(updates).toEqual(
-			expect.arrayContaining([
-				expect.objectContaining({
-					table: "message",
-					values: expect.objectContaining({
-						inputTokens: 9,
-						outputTokens: 0,
-						status: "error",
-					}),
-				}),
-			]),
-		);
+		expect(persisted).toEqual([
+			expect.objectContaining({ status: "error" }),
+		]);
 	});
 
 	test("compacts and retries exactly once after safe overflow before output", async () => {
@@ -635,17 +565,7 @@ describe("GenerationManager SSE lifecycle", () => {
 			yield doneEvent;
 		};
 		const manager = new GenerationManager();
-		manager.start({
-			conversationId: "conversation-1",
-			messageId: "message-1",
-			context: {} as never,
-			selection: {
-				provider: "test",
-				endpointId: "test",
-				modelId: "model",
-				api: "test",
-			},
-			params: {} as never,
+		start(manager, "message-1", {
 			retryContext: async () => {
 				rebuilt++;
 				return { context: { messages: [] }, params: {} as never };
@@ -659,9 +579,9 @@ describe("GenerationManager SSE lifecycle", () => {
 			]),
 		);
 		expect({ calls, rebuilt }).toEqual({ calls: 2, rebuilt: 1 });
-		expect(providerCalls).toEqual(
+		expect(providerCallInserts).toEqual(
 			expect.arrayContaining([
-				expect.objectContaining({ retryAttempt: 0, overflowed: true }),
+				expect.objectContaining({ retryAttempt: 0, overflowed: 1 }),
 			]),
 		);
 	});
@@ -695,17 +615,7 @@ describe("GenerationManager SSE lifecycle", () => {
 			yield { type: "error", error: { errorMessage: "context exceeded" } };
 		};
 		const manager = new GenerationManager();
-		manager.start({
-			conversationId: "conversation-1",
-			messageId: "message-1",
-			context: {} as never,
-			selection: {
-				provider: "test",
-				endpointId: "test",
-				modelId: "model",
-				api: "test",
-			},
-			params: {} as never,
+		start(manager, "message-1", {
 			retryContext: async () => {
 				rebuilt++;
 				return { context: { messages: [] }, params: {} as never };

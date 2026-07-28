@@ -108,7 +108,10 @@ export async function saveAttachmentFile(params: {
 	});
 	await disk.writeFile(path(storageKey), params.bytes);
 	const sha256 = Buffer.from(
-		await crypto.subtle.digest("SHA-256", params.bytes as unknown as BufferSource),
+		await crypto.subtle.digest(
+			"SHA-256",
+			params.bytes as unknown as BufferSource,
+		),
 	).toString("hex");
 	return {
 		id,
@@ -125,154 +128,12 @@ export async function saveAttachmentFile(params: {
 	};
 }
 
-/** Uploads a file to disk and creates an unlinked (`messageId` null) row. */
-export async function saveAttachment(params: {
-	userId: string;
-	filename: string;
-	mimeType: string;
-	bytes: Uint8Array;
-}) {
-	const attachment = await saveAttachmentFile(params);
-	await db
-		.insertInto("attachment")
-		.values({
-			id: attachment.id,
-			userId: params.userId,
-			messageId: null,
-			filename: attachment.filename,
-			mimeType: attachment.mimeType,
-			kind: attachment.kind,
-			byteSize: attachment.byteSize,
-			width: attachment.width,
-			height: attachment.height,
-			pageCount: attachment.pageCount,
-			extractedTextChars: attachment.extractedTextChars,
-			storageKey: attachment.storageKey,
-			createdAt: attachment.createdAt,
-		})
-		.execute();
-
-	return {
-		id: attachment.id,
-		kind: attachment.kind,
-		mimeType: attachment.mimeType,
-		filename: attachment.filename,
-		byteSize: attachment.byteSize,
-	};
-}
-
-/** Reads back an attachment's bytes for the uploading user (composer preview). */
-export async function readAttachment(id: string, userId: string) {
-	const row = await db
-		.selectFrom("attachment")
-		.selectAll()
-		.where("id", "=", id)
-		.where("userId", "=", userId)
-		.executeTakeFirst();
-	if (!row) return null;
-	await ensureOpen();
-	const bytes = await disk.readFile(path(row.storageKey));
-	return { row, bytes };
-}
-
-/** Links previously-uploaded, still-orphaned attachments to the message they
- * were sent with. */
-export async function linkAttachments(
-	ids: string[],
-	userId: string,
-	messageId: string,
-): Promise<void> {
-	if (ids.length === 0) return;
-	await db
-		.updateTable("attachment")
-		.set({ messageId })
-		.where("id", "in", ids)
-		.where("userId", "=", userId)
-		.where("messageId", "is", null)
-		.execute();
-}
-
-export async function attachmentsForMessage(messageId: string) {
-	return db
-		.selectFrom("attachment")
-		.selectAll()
-		.where("messageId", "=", messageId)
-		.orderBy("createdAt", "asc")
-		.execute();
-}
-
-export async function loadAttachmentSummary(attachment: {
-	id: string;
-	filename: string;
-	mimeType: string;
-	kind: string;
-	byteSize: number;
-}): Promise<string> {
-	const fallback = `[Omitted attachment: ${attachment.filename}; type: ${attachment.mimeType}; kind: ${attachment.kind}; bytes: ${attachment.byteSize}]`;
-	if (attachment.kind === "image") return fallback;
-	const row = await db
-		.selectFrom("attachment")
-		.select(["storageKey", "kind", "mimeType"])
-		.where("id", "=", attachment.id)
-		.executeTakeFirst();
-	if (!row || row.kind === "image") return fallback;
-	try {
-		await ensureOpen();
-		const bytes = await disk.readFile(path(row.storageKey));
-		const text =
-			row.kind === "text"
-				? Buffer.from(bytes).toString("utf-8")
-				: await extractDocumentText(bytes, row.mimeType);
-		return `<attachment name="${attachment.filename}">\n${text}\n</attachment>`;
-	} catch {
-		return fallback;
-	}
-}
-
-export async function attachmentMetadata(
-	ids: string[],
-	userId: string,
-): Promise<{ kind: AttachmentKind; mimeType: string }[]> {
-	if (ids.length === 0) return [];
-	const rows = await db
-		.selectFrom("attachment")
-		.select(["kind", "mimeType"])
-		.where("id", "in", ids)
-		.where("userId", "=", userId)
-		.where("messageId", "is", null)
-		.execute();
-	return rows;
-}
-
-async function attachmentsForMessages(messageIds: string[]) {
-	if (messageIds.length === 0) return [];
-	return db
-		.selectFrom("attachment")
-		.selectAll()
-		.where("messageId", "in", messageIds)
-		.execute();
-}
-
-/** Deletes on-disk files for the given messages' attachments. The DB rows are
- * left to SQLite's ON DELETE CASCADE once the messages are deleted — this only
- * covers what the cascade can't: freeing the disk objects. */
-export async function deleteAttachmentFilesForMessages(
-	messageIds: string[],
-): Promise<void> {
-	const rows = await attachmentsForMessages(messageIds);
-	if (rows.length === 0) return;
-	await ensureOpen();
-	await Promise.all(
-		rows.map((r) => disk.unlink(path(r.storageKey)).catch(() => {})),
-	);
-}
-
 /** Frees every disk object owned by a user before their FK-cascaded rows go away. */
 export async function deleteAttachmentFilesForUser(
 	userId: string,
 ): Promise<void> {
 	const rows = await db
-		.selectFrom("attachment")
+		.selectFrom("v2_attachment")
 		.select("storageKey")
 		.where("userId", "=", userId)
 		.execute();
@@ -283,31 +144,43 @@ export async function deleteAttachmentFilesForUser(
 	);
 }
 
-/** Removes an orphaned (never sent) upload — used by the composer's "remove
- * attachment" action. */
-export async function removeOrphanAttachment(
-	id: string,
-	userId: string,
-): Promise<boolean> {
-	const row = await db
-		.selectFrom("attachment")
-		.selectAll()
-		.where("id", "=", id)
-		.where("userId", "=", userId)
-		.where("messageId", "is", null)
-		.executeTakeFirst();
-	if (!row) return false;
+/** Reads raw bytes for a stored attachment by storage key. */
+export async function readAttachmentBytes(
+	storageKey: string,
+): Promise<Uint8Array> {
 	await ensureOpen();
-	await disk.unlink(path(row.storageKey)).catch(() => {});
-	await db.deleteFrom("attachment").where("id", "=", id).execute();
-	return true;
+	return disk.readFile(path(storageKey));
+}
+
+/** Frees disk objects by storage key directly. */
+export async function deleteAttachmentFilesByStorageKey(
+	storageKeys: readonly string[],
+): Promise<void> {
+	if (storageKeys.length === 0) return;
+	await ensureOpen();
+	await Promise.all(
+		storageKeys.map((key) => disk.unlink(path(key)).catch(() => {})),
+	);
 }
 
 /** Builds pi-ai content parts for a message's attachments: images become
  * base64 image parts, plain text is inlined verbatim as a text part (no local
  * extraction, ever — see ARCHITECTURE §6.2). */
-export async function loadAttachmentContentParts(
-	messageId: string,
+export interface AttachmentContentRow {
+	id: string;
+	storageKey: string;
+	kind: AttachmentKind;
+	mimeType: string;
+	filename: string;
+}
+
+/**
+ * Attachment-record-to-content expansion. Reads bytes off disk and decides
+ * between inline text, inline image, provider-native document injection, or
+ * extracted-text fallback.
+ */
+export async function expandAttachmentRows(
+	rows: readonly AttachmentContentRow[],
 	documentInput: DocumentInputCapabilities = {
 		nativeMimeTypes: [],
 		extractedTextMimeTypes: [],
@@ -317,7 +190,6 @@ export async function loadAttachmentContentParts(
 	parts: (TextContent | ImageContent)[];
 	documents: NativeDocumentInput[];
 }> {
-	const rows = await attachmentsForMessage(messageId);
 	if (rows.length === 0) return { parts: [], documents: [] };
 	await ensureOpen();
 	const parts: (TextContent | ImageContent)[] = [];

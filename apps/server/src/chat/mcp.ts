@@ -93,10 +93,10 @@ export async function resolveMcpTools(
 				.onRef("user_mcp_server_preference.serverId", "=", "mcp_server.id")
 				.on("user_mcp_server_preference.userId", "=", userId),
 		)
-		.leftJoin("conversation_mcp_server", (join) =>
+		.leftJoin("v2_conversation_mcp_server", (join) =>
 			join
-				.onRef("conversation_mcp_server.serverId", "=", "mcp_server.id")
-				.on("conversation_mcp_server.conversationId", "=", conversationId),
+				.onRef("v2_conversation_mcp_server.serverId", "=", "mcp_server.id")
+				.on("v2_conversation_mcp_server.conversationId", "=", conversationId),
 		)
 		.select([
 			"mcp_server.id",
@@ -104,7 +104,7 @@ export async function resolveMcpTools(
 			"mcp_server.url",
 			"mcp_server.headers",
 			"user_mcp_server_preference.enabled as preferenceEnabled",
-			"conversation_mcp_server.enabled as conversationEnabled",
+			"v2_conversation_mcp_server.enabled as conversationEnabled",
 		])
 		.where("mcp_server.enabled", "=", 1)
 		.where((eb) =>

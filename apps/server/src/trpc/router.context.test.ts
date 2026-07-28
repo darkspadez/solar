@@ -1,51 +1,13 @@
-import { describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
+import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
+import { createV2TestDatabase } from "../chat-v2/db/fixtures";
+import { zeroUsage } from "../chat-v2/validation";
 
-let ownedConversation = true;
-const contextState = {
-	conversationId: "conversation",
-	revision: 1,
-	summary: "private summary",
-	summaryRevision: 1,
-	retainedMessageBoundaryId: "message",
-	jobStatus: "failed",
-	jobId: null,
-	jobAttempt: 1,
-	jobError: "Task model unavailable",
-	jobUpdatedAt: null,
-	createdAt: "2026-01-01T00:00:00.000Z",
-	updatedAt: "2026-01-01T00:00:00.000Z",
-};
+const USER_ID = "context-user";
+const database = await createV2TestDatabase();
+database.seedUser(USER_ID);
 
-function query(result: unknown) {
-	const builder = {
-		select: () => builder,
-		selectAll: () => builder,
-		where: () => builder,
-		orderBy: () => builder,
-		executeTakeFirst: async () => result,
-	};
-	return builder;
-}
-
-mock.module("../db", () => ({
-	db: {
-		selectFrom: (table: string) =>
-			query(
-				table === "conversation"
-					? ownedConversation
-						? { id: "conversation" }
-						: undefined
-					: table === "conversation_context_state"
-						? contextState
-						: {
-								compactionTokensBefore: 1234,
-								compactionTokensAfter: 321,
-								createdAt: "2026-01-01T00:01:00.000Z",
-							},
-			),
-	},
-	sqlite: {},
-}));
+mock.module("../db", () => ({ db: database.db, sqlite: database.sqlite }));
 mock.module("../auth", () => ({
 	createSolarApiKey: async () => ({ id: "key", key: "sk_solar_test" }),
 	createSolarUser: async () => {},
@@ -54,13 +16,115 @@ mock.module("../auth", () => ({
 mock.module("../chat/attachments", () => ({
 	deleteAttachmentFilesForMessages: async () => {},
 	deleteAttachmentFilesForUser: async () => {},
+	deleteAttachmentFilesByStorageKey: async () => {},
+	expandAttachmentRows: async () => ({ parts: [], documents: [] }),
+}));
+mock.module("../chat/generationManager", () => ({
+	generationManager: { isActive: () => false },
+}));
+mock.module("../logger", () => ({
+	logger: {
+		withMetadata: () => ({ trace: () => {}, debug: () => {}, info: () => {}, warn: () => {}, error: () => {} }),
+		withError: () => ({ withMetadata: () => ({ warn: () => {}, error: () => {} }) }),
+	},
+	getLogLevel: () => "info",
+	setLogLevel: () => {},
+}));
+mock.module("../chat/catalog", () => ({
+	MOCK: true,
+	PROVIDER_APIS: ["openai-responses"],
+	parseAllowlist: () => [],
+	listAvailableModels: async () => [],
+	resolveSelection: async () => ({
+		provider: "mock",
+		endpointId: "mock",
+		modelId: "mock",
+		api: "mock",
+	}),
+	resolveModel: async () => {
+		throw new Error("resolveModel should not be called in this test");
+	},
+	streamModel: () => {
+		throw new Error("streamModel should not be called in this test");
+	},
+	resolveTaskModelOrFallback: async (selection: unknown) => selection,
+	getModelCapabilities: async () => ({
+		reasoningLevels: [],
+		supportsVerbosity: false,
+		defaultReasoningEffort: null,
+		defaultVerbosity: null,
+	}),
+	documentInputMimeTypes: async () => [],
+	documentInputCapabilities: async () => ({ nativeMimeTypes: [], extractedTextMimeTypes: [] }),
+	getUserDefault: async () => null,
+	setUserDefault: async () => {},
+	getUserDefaultPreset: async () => null,
+	setUserDefaultPreset: async () => {},
+	getUserDefaultDisplayMode: async () => "compact",
+	setUserDefaultDisplayMode: async () => {},
+	getAdminDefault: async () => null,
+	setAdminDefault: async () => {},
+	getTaskModel: async () => null,
+	setTaskModel: async () => {},
+	getTitlePrompt: async () => "",
+	setTitlePrompt: async () => {},
+	importProviderModels: async () => {},
+	loadProviderConfigs: async () => [],
 }));
 
 const { appRouter } = await import("./router");
+const { chatV2Repository } = await import("../chat/v2Live");
 const { DEFAULT_CONTEXT_GLOBAL_SETTINGS, parseContextGlobalSettings } =
 	await import("../context/settings");
 
+function assistant(text: string): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text }],
+		timestamp: Date.now(),
+		provider: "mock",
+		api: "openai-completions",
+		model: "mock",
+		usage: zeroUsage(),
+		stopReason: "stop",
+	};
+}
+
+async function seedCompactableConversation(conversationId: string) {
+	await chatV2Repository.createConversation(USER_ID, { id: conversationId, title: "Chat" });
+	const messages: Message[] = [
+		{ role: "user", content: "first", timestamp: 1 },
+		assistant("first reply"),
+		{ role: "user", content: "second", timestamp: 2 },
+		assistant("second reply"),
+		{ role: "user", content: "third", timestamp: 3 },
+		assistant("third reply"),
+	];
+	for (const [ordinal, message] of messages.entries()) {
+		const turnId = `turn-${ordinal}`;
+		await chatV2Repository.createTurn(USER_ID, conversationId, {
+			id: turnId,
+			ordinal,
+			role: message.role === "user" ? "user" : "assistant",
+			origin: "text",
+			status: "complete",
+		});
+		await chatV2Repository.appendCanonicalMessages(USER_ID, conversationId, [{
+			id: `message-${ordinal}`,
+			turnId,
+			message,
+			origin: "text",
+			status: "complete",
+		}]);
+	}
+}
+
 describe("context management metadata", () => {
+	afterEach(async () => {
+		await database.reset();
+		database.seedUser(USER_ID);
+	});
+
 	test("uses built-in settings for absent, malformed, and unsupported metadata", () => {
 		expect(parseContextGlobalSettings(null)).toEqual(
 			DEFAULT_CONTEXT_GLOBAL_SETTINGS,
@@ -96,43 +160,49 @@ describe("context management metadata", () => {
 		);
 	});
 
-	test("returns owner-visible context status without summary content", async () => {
-		const caller = appRouter.createCaller({ user: { id: "user" } } as never);
+	test("returns idle context status for a conversation with no compactions", async () => {
+		const conversation = await chatV2Repository.createConversation(USER_ID, { title: "Chat" });
+		const caller = appRouter.createCaller({ user: { id: USER_ID } } as never);
 
 		await expect(
-			caller.conversation.contextState({ conversationId: "conversation" }),
+			caller.conversation.contextState({ conversationId: conversation.id }),
 		).resolves.toEqual({
-			state: "failed",
-			estimatedTokens: 1234,
-			summarized: true,
-			jobError: "Task model unavailable",
-			summaryEvent: {
-				tokensBefore: 1234,
-				tokensAfter: 321,
-				revision: 1,
-				createdAt: "2026-01-01T00:01:00.000Z",
-				retainedMessageBoundaryId: "message",
-			},
+			state: "idle",
+			estimatedTokens: null,
+			summarized: false,
+			jobError: null,
+			summaryEvent: null,
 		});
 	});
 
+	test("reports a summarized context status once a compaction is manually created", async () => {
+		const conversationId = "compactable-conversation";
+		await seedCompactableConversation(conversationId);
+		const caller = appRouter.createCaller({ user: { id: USER_ID } } as never);
+
+		await caller.conversation.compact({ conversationId });
+
+		const status = await caller.conversation.contextState({ conversationId });
+		expect(status.state).toBe("idle");
+		expect(status.summarized).toBe(true);
+		expect(status.summaryEvent).not.toBeNull();
+	});
+
 	test("rejects context status for a conversation the user does not own", async () => {
-		ownedConversation = false;
-		const caller = appRouter.createCaller({ user: { id: "user" } } as never);
+		const conversation = await chatV2Repository.createConversation(USER_ID, { title: "Chat" });
+		const caller = appRouter.createCaller({ user: { id: "someone-else" } } as never);
 
 		await expect(
-			caller.conversation.contextState({ conversationId: "conversation" }),
+			caller.conversation.contextState({ conversationId: conversation.id }),
 		).rejects.toMatchObject({ code: "NOT_FOUND" });
-		ownedConversation = true;
 	});
 
 	test("rejects compact for a conversation the user does not own", async () => {
-		ownedConversation = false;
-		const caller = appRouter.createCaller({ user: { id: "user" } } as never);
+		const conversation = await chatV2Repository.createConversation(USER_ID, { title: "Chat" });
+		const caller = appRouter.createCaller({ user: { id: "someone-else" } } as never);
 
 		await expect(
-			caller.conversation.compact({ conversationId: "conversation" }),
+			caller.conversation.compact({ conversationId: conversation.id }),
 		).rejects.toMatchObject({ code: "NOT_FOUND" });
-		ownedConversation = true;
 	});
 });

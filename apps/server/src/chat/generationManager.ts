@@ -1,17 +1,59 @@
 import type { Context } from "@earendil-works/pi-ai";
 import { db } from "../db";
-import type { MessageStatus } from "../db/schema";
+import type { MessageStatus, ProviderCallPurpose } from "../db/schema";
 import { piEventToUiChunks, type UiChunk } from "./adapter";
 import type { GenerationParams, ModelSelection } from "./catalog";
 import { generateTitle, streamChat } from "./models";
 import { logger } from "../logger";
 import type { ResolvedTool } from "./mcp";
-import { ContextRepository } from "../context/repository";
 import type {
 	ChatProviderCall,
 	ModelCallTelemetry,
 	TelemetryMetadata,
 } from "../context/telemetry";
+
+async function recordProviderCallTelemetry(input: {
+	id: string;
+	conversationId: string;
+	messageId: string;
+	purpose: ProviderCallPurpose;
+	call: ModelCallTelemetry;
+}): Promise<void> {
+	const { call } = input;
+	await db
+		.insertInto("provider_call_telemetry")
+		.values({
+			id: input.id,
+			conversationId: input.conversationId,
+			messageId: input.messageId,
+			purpose: input.purpose,
+			provider: call.provider,
+			api: call.api,
+			modelId: call.modelId,
+			inputTokens: call.inputTokens ?? null,
+			outputTokens: call.outputTokens ?? null,
+			cacheReadTokens: call.cacheReadTokens ?? null,
+			cacheWriteTokens: call.cacheWriteTokens ?? null,
+			estimatedCostMicros: call.estimatedCostMicros ?? null,
+			latencyMs: call.latencyMs ?? null,
+			contextPolicySource: call.contextPolicySource ?? null,
+			contextPolicyEnabled:
+				call.contextPolicyEnabled === undefined
+					? null
+					: call.contextPolicyEnabled
+						? 1
+						: 0,
+			contextPolicyState: call.contextPolicyState
+				? JSON.stringify(call.contextPolicyState)
+				: null,
+			overflowed: call.overflowed ? 1 : 0,
+			retryAttempt: call.retryAttempt ?? 0,
+			compactionTokensBefore: call.compactionTokensBefore ?? null,
+			compactionTokensAfter: call.compactionTokensAfter ?? null,
+			createdAt: new Date().toISOString(),
+		})
+		.execute();
+}
 
 interface BufferedChunk {
 	id: number;
@@ -48,7 +90,12 @@ interface Generation {
 	steps: unknown[];
 	providerCalls: ChatProviderCall[];
 	telemetry: TelemetryMetadata;
-	persistExternally?: (result: {
+	persist: (result: {
+		/** Ordered raw pi-ai messages (assistant/toolResult) from the tool loop,
+		 * excluding the final continuation. */
+		steps: unknown[];
+		/** The final assistant continuation (possibly combined from streamed
+		 * step fragments), or the whole message when there was no tool loop. */
 		parts: unknown;
 		status: MessageStatus;
 		text: string;
@@ -69,6 +116,7 @@ interface TitleGeneration {
 	firstMessage: string;
 	prompt: string;
 	selection: ModelSelection;
+	persistTitle: (title: string) => Promise<boolean>;
 }
 
 const encoder = new TextEncoder();
@@ -109,7 +157,7 @@ export class GenerationManager {
 		tools?: ResolvedTool[];
 		titleGeneration?: TitleGeneration;
 		telemetry?: TelemetryMetadata;
-		persistExternally?: Generation["persistExternally"];
+		persist: Generation["persist"];
 		retryContext?: () => Promise<{
 			context: Context;
 			params: GenerationParams;
@@ -139,7 +187,7 @@ export class GenerationManager {
 			steps: [],
 			providerCalls: [],
 			telemetry: opts.telemetry ?? {},
-			persistExternally: opts.persistExternally,
+			persist: opts.persist,
 		};
 		this.generations.set(opts.messageId, gen);
 		logger
@@ -449,13 +497,7 @@ export class GenerationManager {
 			);
 			const title = parseTitle(response);
 			if (!title) return null;
-			const result = await db
-				.updateTable("conversation")
-				.set({ title })
-				.where("id", "=", conversationId)
-				.where("title", "=", "New conversation")
-				.executeTakeFirst();
-			return result.numUpdatedRows > 0 ? title : null;
+			return (await generation.persistTitle(title)) ? title : null;
 		} catch (error) {
 			logger
 				.withError(error)
@@ -465,12 +507,12 @@ export class GenerationManager {
 		} finally {
 			await Promise.all(
 				calls.map((call) =>
-					new ContextRepository(db).recordProviderCall({
+					recordProviderCallTelemetry({
 						id: crypto.randomUUID(),
 						conversationId,
 						messageId,
 						purpose: "title",
-						...call,
+						call,
 					}),
 				),
 			);
@@ -478,82 +520,29 @@ export class GenerationManager {
 	}
 
 	private async persist(gen: Generation, status: MessageStatus): Promise<void> {
-		const fullParts = buildFullAssistantParts(gen);
-		const persistedParts = withPersistedReasoning(fullParts, gen.reasoning);
-		if (gen.persistExternally) {
-			await gen.persistExternally({
-				parts: persistedParts,
-				status,
-				text: gen.text,
-			});
-			return;
-		}
-		await db
-			.updateTable("message")
-			.set({
-				text: gen.text,
-				parts: persistedParts
-					? JSON.stringify({
-							...(persistedParts as Record<string, unknown>),
-							solarToolCalls: gen.toolCalls,
-						})
-					: null,
-				status,
-				model: gen.model,
-				inputTokens: gen.usage.inputTokens,
-				outputTokens: gen.usage.outputTokens,
-			})
-			.where("id", "=", gen.messageId)
-			.execute();
-
-		const repository = new ContextRepository(db);
-		await Promise.all([
-			repository.recordGenerationSteps(gen.messageId, gen.steps),
-			...gen.providerCalls.map(({ purpose, observation }) => {
+		// The tool loop's intermediate assistant/toolResult messages must be
+		// persisted as the ordered, separate pi-ai messages they actually are —
+		// not flattened into one synthetic combined message.
+		const persistedParts = withPersistedReasoning(gen.parts, gen.reasoning);
+		await gen.persist({
+			steps: gen.steps,
+			parts: persistedParts,
+			status,
+			text: gen.text,
+		});
+		await Promise.all(
+			gen.providerCalls.map(({ purpose, observation }) => {
 				const { error: _error, ...call } = observation;
-				return repository.recordProviderCall({
+				return recordProviderCallTelemetry({
 					id: crypto.randomUUID(),
 					conversationId: gen.conversationId,
 					messageId: gen.messageId,
 					purpose,
-					...call,
+					call,
 				});
 			}),
-		]);
-
-		await db
-			.updateTable("conversation")
-			.set({ updatedAt: new Date().toISOString() })
-			.where("id", "=", gen.conversationId)
-			.execute();
+		);
 	}
-}
-
-function buildFullAssistantParts(gen: Generation): unknown {
-	const assistantSteps = gen.steps.filter(
-		(step) =>
-			step != null &&
-			typeof step === "object" &&
-			(step as { role?: unknown }).role === "assistant" &&
-			Array.isArray((step as { content?: unknown }).content),
-	);
-
-	if (assistantSteps.length === 0) return gen.parts;
-
-	const combinedContent: unknown[] = [];
-	for (const step of assistantSteps) {
-		const content = (step as { content: unknown[] }).content;
-		combinedContent.push(...content);
-	}
-
-	const baseMessage = (gen.parts as Record<string, unknown>) ?? {
-		role: "assistant",
-	};
-
-	return {
-		...baseMessage,
-		content: combinedContent,
-	};
 }
 
 function withPersistedReasoning(parts: unknown, reasoning: string): unknown {

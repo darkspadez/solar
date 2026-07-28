@@ -33,21 +33,31 @@ mock.module("../context/runtime", () => ({ contextRuntime: { assemble: async () 
 mock.module("./location", () => ({ reverseGeocode: async () => undefined }));
 mock.module("../logger", () => ({ logger: { withMetadata: () => ({ trace: () => {} }) } }));
 mock.module("./v2Live", () => ({
-	isChatV2Enabled: () => true,
-	chatV2Repository: { getTurn: async () => ({ conversationId: "v2-conversation" }) },
-	ownsV2AssistantTurn: async () => true,
-	ownsV2Conversation: async () => true,
-	ownsV2UserTurn: async () => true,
-	sendV2Message: async () => "unused",
-	editV2UserMessage: async (input: Record<string, unknown>) => {
+	chatV2Repository: {
+		getTurn: async (_userId: string, turnId: string) => ({
+			id: turnId,
+			conversationId: "v2-conversation",
+			role: turnId === "user-turn" ? "user" : "assistant",
+		}),
+		getAssistantTurnForUserTurn: async (_userId: string, userTurnId: string) => ({
+			id: `${userTurnId}-assistant-reply`,
+			conversationId: "v2-conversation",
+			role: "assistant",
+		}),
+	},
+	ownsAssistantTurn: async () => true,
+	ownsConversation: async () => true,
+	ownsUserTurn: async () => true,
+	sendMessage: async () => "unused",
+	editUserMessage: async (input: Record<string, unknown>) => {
 		calls.push({ name: "edit", input });
 		return "edited-assistant";
 	},
-	regenerateV2AssistantTurn: async (input: Record<string, unknown>) => {
+	regenerateAssistantTurn: async (input: Record<string, unknown>) => {
 		calls.push({ name: "regenerate", input });
 		return "regenerated-assistant";
 	},
-	stopV2Generation: async (_userId: string, messageId: string) => {
+	stopGeneration: async (_userId: string, messageId: string) => {
 		calls.push({ name: "stop", input: { messageId } });
 		return true;
 	},
@@ -77,6 +87,21 @@ describe("chat-v2 live edit routes", () => {
 		expect(calls).toEqual([
 			{ name: "edit", input: { userId: "v2-user", isAdmin: false, conversationId: "v2-conversation", targetTurnId: "user-turn", text: "Edited" } },
 			{ name: "regenerate", input: { userId: "v2-user", isAdmin: false, conversationId: "v2-conversation", targetTurnId: "assistant-turn" } },
+		]);
+	});
+
+	// assistant-ui's reload() passes the *parent* id of the assistant message
+	// being reloaded, which is the preceding user turn, not the assistant turn.
+	test("regenerate resolves a user turn id to its assistant reply", async () => {
+		const regenerate = await chatRoutes.request("/regenerate", new Request("http://solar.local/regenerate", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ messageId: "user-turn" }),
+		}));
+		expect(regenerate.status).toBe(202);
+		expect(await regenerate.json()).toEqual({ messageId: "regenerated-assistant" });
+		expect(calls).toEqual([
+			{ name: "regenerate", input: { userId: "v2-user", isAdmin: false, conversationId: "v2-conversation", targetTurnId: "user-turn-assistant-reply" } },
 		]);
 	});
 

@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { createV2TestDatabase } from "../chat-v2/db/fixtures";
 
 const skillContent = `---
 name: release-notes
@@ -6,61 +7,23 @@ description: Draft release notes.
 ---
 # Release notes
 `;
-const inserted: Record<string, unknown>[] = [];
 
-function query(table: string) {
-	const filters: [string, unknown][] = [];
-	const builder = {
-		select: () => builder,
-		where: (column: string, _operator: string, value: unknown) => {
-			filters.push([column, value]);
-			return builder;
-		},
-		orderBy: () => builder,
-		limit: () => builder,
-		executeTakeFirst: async () => {
-			if (table === "conversation") return { id: "conversation" };
-			if (table === "skill")
-				return { name: "release-notes", content: skillContent };
-			return undefined;
-		},
-		execute: async () => {
-			if (table === "message") {
-				if (filters.some(([column]) => column === "status"))
-					return inserted.filter((row) => row.role === "user");
-				return inserted.filter((row) => row.role === "user");
-			}
-			return [];
-		},
-	};
-	return builder;
-}
+const USER_ID = "owner";
+const database = await createV2TestDatabase();
+database.seedUser(USER_ID);
 
 mock.module("../auth", () => ({
-	getSolarSession: async () => ({ user: { id: "owner", role: "user" } }),
+	getSolarSession: async () => ({ user: { id: USER_ID, role: "user" } }),
 }));
-mock.module("../db", () => ({
-	db: {
-		selectFrom: (table: string) => query(table),
-		insertInto: () => ({
-			values: (row: Record<string, unknown>) => ({
-				execute: async () => {
-					inserted.push(row);
-				},
-			}),
-		}),
-		updateTable: () => ({
-			set: () => ({ where: () => ({ execute: async () => {} }) }),
-		}),
-	},
-	sqlite: {},
-}));
+mock.module("../db", () => ({ db: database.db, sqlite: database.sqlite }));
 mock.module("./attachments", () => ({
 	attachmentMetadata: async () => [],
 	deleteAttachmentFilesForMessages: async () => {},
+	deleteAttachmentFilesByStorageKey: async () => {},
 	linkAttachments: async () => {},
 	loadAttachmentContentParts: async () => ({ parts: [], documents: [] }),
 	loadAttachmentSummary: async () => "",
+	expandAttachmentRows: async () => ({ parts: [], documents: [] }),
 }));
 mock.module("./catalog", () => ({
 	MOCK: true,
@@ -69,7 +32,13 @@ mock.module("./catalog", () => ({
 		extractedTextMimeTypes: [],
 	}),
 	documentInputMimeTypes: async () => [],
-	getModelCapabilities: async () => ({}),
+	getModelCapabilities: async () => ({
+		reasoningLevels: [],
+		supportsVerbosity: false,
+		defaultReasoningEffort: null,
+		defaultVerbosity: null,
+	}),
+	listAvailableModels: async () => [],
 	getTitlePrompt: async () => "",
 	resolveSelection: async () => ({
 		provider: "mock",
@@ -85,29 +54,49 @@ mock.module("./catalog", () => ({
 		throw new Error("streamModel should not be called when MOCK is true");
 	},
 }));
+let startedGeneration: { context: unknown; persist?: (result: unknown) => Promise<void> } | undefined;
 mock.module("./generationManager", () => ({
-	generationManager: { start: async () => {} },
-}));
-mock.module("./tools", () => ({ toolProvider: { resolve: async () => [] } }));
-mock.module("../context/runtime", () => ({
-	contextRuntime: {
-		assemble: async () => ({
-			messageIds: undefined,
-			summary: null,
-			allowedAttachmentIds: undefined,
-		}),
+	generationManager: {
+		start: (opts: typeof startedGeneration) => {
+			startedGeneration = opts;
+		},
 	},
 }));
+mock.module("./tools", () => ({ toolProvider: { resolve: async () => [] } }));
 mock.module("./location", () => ({ reverseGeocode: async () => undefined }));
 mock.module("../logger", () => ({
-	logger: { withMetadata: () => ({ trace: () => {} }) },
+	logger: {
+		withMetadata: () => ({ trace: () => {}, debug: () => {}, info: () => {}, warn: () => {}, error: () => {} }),
+		withError: () => ({ withMetadata: () => ({ warn: () => {}, error: () => {} }) }),
+	},
 }));
 
 const { chatRoutes } = await import("./routes");
+const { chatV2Repository } = await import("./v2Live");
 
 describe("skill chat POST", () => {
-	beforeEach(() => {
-		inserted.length = 0;
+	let conversationId: string;
+
+	beforeEach(async () => {
+		startedGeneration = undefined;
+		const conversation = await chatV2Repository.createConversation(USER_ID, { title: "Chat" });
+		conversationId = conversation.id;
+		await database.db
+			.insertInto("skill")
+			.values({
+				id: crypto.randomUUID(),
+				userId: USER_ID,
+				name: "release-notes",
+				description: "Draft release notes.",
+				content: skillContent,
+				exposed: 1,
+			})
+			.execute();
+	});
+
+	afterEach(async () => {
+		await database.reset();
+		database.seedUser(USER_ID);
 	});
 
 	test("persists a hidden explicit skill invocation with the ordinary user text", async () => {
@@ -117,7 +106,7 @@ describe("skill chat POST", () => {
 				method: "POST",
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify({
-					conversationId: "conversation",
+					conversationId,
 					skillName: "release-notes",
 					text: "prepare the patch",
 				}),
@@ -125,16 +114,15 @@ describe("skill chat POST", () => {
 		);
 
 		expect(response.status).toBe(202);
-		expect(inserted[0]).toMatchObject({
-			role: "user",
-			text: "prepare the patch",
-			parts: JSON.stringify({
-				solarSkillInvocation: {
-					name: "release-notes",
-					content: skillContent,
-				},
-			}),
-		});
+		const messages = await chatV2Repository.listCanonicalMessages(USER_ID, conversationId);
+		const userMessage = messages.find((message) => message.message.role === "user");
+		expect(userMessage).toBeDefined();
+		const content = userMessage!.message.role === "user" ? userMessage!.message.content : undefined;
+		const text = typeof content === "string"
+			? content
+			: content?.filter((part) => part.type === "text").map((part) => part.text).join("\n");
+		expect(text).toContain("prepare the patch");
+		expect(text).toContain(skillContent);
 	});
 
 	test("rejects malformed skill names before querying or persisting", async () => {
@@ -144,7 +132,7 @@ describe("skill chat POST", () => {
 				method: "POST",
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify({
-					conversationId: "conversation",
+					conversationId,
 					skillName: "Release Notes",
 					text: "prepare the patch",
 				}),
@@ -152,6 +140,8 @@ describe("skill chat POST", () => {
 		);
 
 		expect(response.status).toBe(400);
-		expect(inserted).toEqual([]);
+		expect(
+			(await chatV2Repository.listCanonicalMessages(USER_ID, conversationId)).length,
+		).toBe(0);
 	});
 });

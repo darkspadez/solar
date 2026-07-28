@@ -126,21 +126,23 @@ const apiKey = required(
 	"api-key (or set SOLAR_API_KEY)",
 );
 
-if (command === "inspect")
+if (command === "inspect") {
+	const email = required(values.user, "user");
+	const id = await userId(url, apiKey, email);
 	console.log(
 		JSON.stringify(
 			await trpc(
 				url,
 				apiKey,
 				"admin.debug.chatRows",
-				{ chatId: required(values.chat, "chat") },
+				{ chatId: required(values.chat, "chat"), userId: id },
 				"GET",
 			),
 			null,
 			2,
 		),
 	);
-else if (command === "export-all") {
+} else if (command === "export-all") {
 	const output = required(values.output, "output");
 	const users = (await trpc(
 		url,

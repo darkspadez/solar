@@ -304,4 +304,123 @@ describe("chat-v2 database", () => {
 		])
 			await expect(lookup()).rejects.toBeInstanceOf(V2NotFoundError);
 	});
+
+	test("resolves a user turn to the assistant turn that immediately follows it", async () => {
+		const { repository } = await repositoryFixture();
+		const conversation = await repository.createConversation(USER_A, {
+			id: "conversation-b",
+			title: "Test conversation",
+		});
+		await repository.createTurn(USER_A, conversation.id, {
+			id: "user-turn",
+			ordinal: 0,
+			role: "user",
+			origin: "text",
+			status: "complete",
+		});
+		await repository.createTurn(USER_A, conversation.id, {
+			id: "assistant-turn",
+			ordinal: 1,
+			role: "assistant",
+			origin: "text",
+			status: "complete",
+		});
+		expect(
+			await repository.getAssistantTurnForUserTurn(USER_A, "user-turn"),
+		).toMatchObject({ id: "assistant-turn" });
+		await expect(
+			repository.getAssistantTurnForUserTurn(USER_B, "user-turn"),
+		).rejects.toBeInstanceOf(V2NotFoundError);
+		await expect(
+			repository.getAssistantTurnForUserTurn(USER_A, "assistant-turn"),
+		).rejects.toBeInstanceOf(V2NotFoundError);
+	});
+
+	test("persists per-conversation model, effort, verbosity, display mode, and MCP settings", async () => {
+		const { repository } = await repositoryFixture();
+		const conversation = await repository.createConversation(USER_A, {
+			title: "Settings",
+		});
+
+		await repository.setConversationModel(USER_A, conversation.id, {
+			provider: "openai",
+			endpointId: "openai-default",
+			modelId: "gpt-5.6",
+			modelApi: "openai-responses",
+		});
+		await repository.setConversationGenerationSettings(USER_A, conversation.id, {
+			reasoningEffort: "high",
+			verbosity: "low",
+		});
+		await repository.setConversationDisplayMode(USER_A, conversation.id, "timeline");
+		await repository.setConversationAutoExecuteTools(USER_A, conversation.id, false);
+
+		const reloaded = await repository.getConversation(USER_A, conversation.id);
+		expect(reloaded.provider).toBe("openai");
+		expect(reloaded.endpointId).toBe("openai-default");
+		expect(reloaded.modelId).toBe("gpt-5.6");
+		expect(reloaded.modelApi).toBe("openai-responses");
+		expect(reloaded.reasoningEffort).toBe("high");
+		expect(reloaded.verbosity).toBe("low");
+		expect(reloaded.displayMode).toBe("timeline");
+		expect(reloaded.autoExecuteTools).toBe(0);
+
+		// Partial updates leave previously set fields untouched.
+		await repository.setConversationGenerationSettings(USER_A, conversation.id, {
+			verbosity: "high",
+		});
+		const afterPartialUpdate = await repository.getConversation(USER_A, conversation.id);
+		expect(afterPartialUpdate.reasoningEffort).toBe("high");
+		expect(afterPartialUpdate.verbosity).toBe("high");
+
+		// Ownership is enforced the same way as every other repository mutation.
+		await expect(
+			repository.setConversationModel(USER_B, conversation.id, {
+				provider: "openai",
+				endpointId: "openai-default",
+				modelId: "gpt-5.6",
+				modelApi: "openai-responses",
+			}),
+		).rejects.toBeInstanceOf(V2NotFoundError);
+	});
+
+	test("binds and lists MCP servers per conversation, isolated from other conversations", async () => {
+		const { db, repository } = await repositoryFixture();
+		const conversation = await repository.createConversation(USER_A, {
+			title: "MCP",
+		});
+		const otherConversation = await repository.createConversation(USER_A, {
+			title: "Other",
+		});
+		await db
+			.insertInto("mcp_server")
+			.values({
+				id: "server-1",
+				userId: null,
+				name: "Shared server",
+				url: "https://example.test/mcp",
+				headers: "{}",
+				enabled: 1,
+				createdAt: new Date().toISOString(),
+				updatedAt: new Date().toISOString(),
+			})
+			.execute();
+
+		await repository.setConversationMcpServer(USER_A, conversation.id, "server-1", true);
+		expect(
+			await repository.listConversationMcpServers(USER_A, conversation.id),
+		).toEqual([{ serverId: "server-1", enabled: true }]);
+		expect(
+			await repository.listConversationMcpServers(USER_A, otherConversation.id),
+		).toEqual([]);
+
+		await repository.setConversationMcpServer(USER_A, conversation.id, "server-1", false);
+		expect(
+			await repository.listConversationMcpServers(USER_A, conversation.id),
+		).toEqual([{ serverId: "server-1", enabled: false }]);
+
+		await expect(
+			repository.listConversationMcpServers(USER_B, conversation.id),
+		).rejects.toBeInstanceOf(V2NotFoundError);
+	});
 });

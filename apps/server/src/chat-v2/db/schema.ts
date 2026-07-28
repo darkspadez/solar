@@ -11,8 +11,19 @@ export interface V2ConversationTable {
 	modelApi: string | null;
 	systemPrompt: string | null;
 	generationConfigJson: Generated<string>;
+	reasoningEffort: string | null;
+	reasoningSummary: Generated<number>;
+	verbosity: string | null;
+	autoExecuteTools: Generated<number>;
+	displayMode: string | null;
 	createdAt: Generated<string>;
 	updatedAt: Generated<string>;
+}
+
+export interface V2ConversationMcpServerTable {
+	conversationId: string;
+	serverId: string;
+	enabled: Generated<number>;
 }
 
 export interface V2FolderTable {

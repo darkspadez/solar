@@ -1,6 +1,40 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ModelSelection } from "../chat/catalog";
-import type { ProviderCallTelemetry } from "./types";
+import type { ProviderCallPurpose } from "../db/schema";
+
+export type ContextPolicySource = "exact_model" | "model_family" | "derived";
+
+export type ContextPolicy = {
+	enabled: boolean;
+	softTriggerTokens: number;
+	targetTokens: number;
+	hardInputTokens: number;
+	maxPinnedAttachmentTokens: number;
+	outputReserveTokens: number;
+};
+
+export type ProviderCallTelemetry = {
+	id: string;
+	conversationId?: string;
+	messageId?: string;
+	provider: string;
+	api: string;
+	modelId: string;
+	purpose: ProviderCallPurpose;
+	inputTokens?: number;
+	outputTokens?: number;
+	cacheReadTokens?: number;
+	cacheWriteTokens?: number;
+	estimatedCostMicros?: number;
+	latencyMs?: number;
+	contextPolicySource?: ContextPolicySource;
+	contextPolicyEnabled?: boolean;
+	contextPolicyState?: ContextPolicy;
+	overflowed?: boolean;
+	retryAttempt?: number;
+	compactionTokensBefore?: number;
+	compactionTokensAfter?: number;
+};
 
 export type TelemetryMetadata = Pick<
 	ProviderCallTelemetry,

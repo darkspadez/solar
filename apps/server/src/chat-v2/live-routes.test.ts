@@ -7,7 +7,6 @@ const USER_ID = "live-user";
 const IMPORT_USER_ID = "live-import-user";
 const database = await createV2TestDatabase();
 
-process.env.SOLAR_CHAT_V2 = "1";
 process.env.SOLAR_ATTACHMENTS_DIR = "/test/attachments";
 
 mock.module("../db", () => ({ db: database.db, sqlite: database.sqlite }));
@@ -47,7 +46,7 @@ afterAll(async () => {
 	await database.destroy();
 });
 
-describe("SOLAR_CHAT_V2 live routes", () => {
+describe("chat-v2 live routes", () => {
 	test("uploads and binds attachments only in v2 tables", async () => {
 		const form = new FormData();
 		form.set("file", new File(["route attachment"], "note.txt", { type: "text/plain" }));
@@ -139,13 +138,14 @@ describe("SOLAR_CHAT_V2 live routes", () => {
 			userId: USER_ID,
 			conversationId: "history-conversation",
 		});
+		if (!("version" in history)) throw new Error("expected a single-conversation export bundle");
 		expect(history.version).toBe(2);
 		const imported = await caller.admin.history.import({
 			userId: IMPORT_USER_ID,
 			history,
 			remap: true,
 		});
-		if (!("conversationId" in imported)) throw new Error("expected v2 import result");
+		if (!imported || !("conversationId" in imported)) throw new Error("expected v2 import result");
 		expect(
 			(await repository.listCanonicalMessages(IMPORT_USER_ID, imported.conversationId)).map(
 				(message) => message.message,

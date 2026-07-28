@@ -105,6 +105,8 @@ mock.module("../auth", () => ({
 mock.module("../chat/attachments", () => ({
 	deleteAttachmentFilesForMessages: async () => {},
 	deleteAttachmentFilesForUser: async () => {},
+	deleteAttachmentFilesByStorageKey: async () => {},
+	expandAttachmentRows: async () => ({ parts: [], documents: [] }),
 }));
 
 const { appRouter } = await import("./router");

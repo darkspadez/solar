@@ -1,14 +1,53 @@
-import type { AssistantMessage, Context, Message } from "@earendil-works/pi-ai";
+import type {
+	AssistantMessage,
+	Context,
+	Message,
+	TextContent,
+} from "@earendil-works/pi-ai";
+import {
+	convertToLlm,
+	createCompactionSummaryMessage,
+	DEFAULT_COMPACTION_SETTINGS,
+} from "@earendil-works/pi-agent-core";
 import { db } from "../db";
-import { config } from "../config";
 import { generationManager } from "./generationManager";
-import { resolveSelection, type GenerationParams, type ModelSelection } from "./catalog";
+import {
+	documentInputCapabilities,
+	getModelCapabilities,
+	getTitlePrompt,
+	listAvailableModels,
+	resolveModel,
+	resolveSelection,
+	resolveTaskModelOrFallback,
+	type GenerationParams,
+	type ModelSelection,
+} from "./catalog";
+import { toolProvider } from "./tools";
+import type { ResolvedTool } from "./mcp";
+import {
+	contextualUserText,
+	listExposedSkills,
+	skillCatalogContext,
+	skillInvocationContext,
+} from "./skills";
+import {
+	deleteAttachmentFilesByStorageKey,
+	expandAttachmentRows,
+	type AttachmentContentRow,
+} from "./attachments";
+import {
+	renderBuiltinPromptInterpolations,
+	type UserLocation,
+} from "./builtins";
 import { ChatV2Repository } from "../chat-v2/db/repository";
 import { GenerationService } from "../chat-v2/generation";
 import { ChatV2EditService } from "../chat-v2/edit";
 import { loadCanonicalHistory } from "../chat-v2/history";
 import { materializeContext } from "../chat-v2/context";
-import { enqueueCompactionForCompletedGeneration } from "../chat-v2/compactionScheduler";
+import {
+	enqueueCompactionForCompletedGeneration,
+	type CompactionTriggerPolicy,
+} from "../chat-v2/compactionScheduler";
 import { CompactionService } from "../chat-v2/compaction";
 import { createV2Summarizer } from "../chat-v2/summarizer";
 import { projectVisibleTurns } from "../chat-v2/projection";
@@ -18,13 +57,18 @@ import { logger } from "../logger";
 
 export const chatV2Repository = new ChatV2Repository(db);
 const generationService = new GenerationService(chatV2Repository);
-const editService = new ChatV2EditService(chatV2Repository);
+const editService = new ChatV2EditService(
+	chatV2Repository,
+	async (attachmentIds) => {
+		const storageKeys = await chatV2Repository.deleteAttachments(attachmentIds);
+		await deleteAttachmentFilesByStorageKey(storageKeys);
+	},
+);
 
-export function isChatV2Enabled(): boolean {
-	return config.chatV2;
-}
-
-export async function ownsV2Conversation(userId: string, conversationId: string): Promise<boolean> {
+export async function ownsConversation(
+	userId: string,
+	conversationId: string,
+): Promise<boolean> {
 	try {
 		await chatV2Repository.getConversation(userId, conversationId);
 		return true;
@@ -33,15 +77,23 @@ export async function ownsV2Conversation(userId: string, conversationId: string)
 	}
 }
 
-export async function ownsV2AssistantTurn(userId: string, turnId: string): Promise<boolean> {
+export async function ownsAssistantTurn(
+	userId: string,
+	turnId: string,
+): Promise<boolean> {
 	try {
-		return (await chatV2Repository.getTurn(userId, turnId)).role === "assistant";
+		return (
+			(await chatV2Repository.getTurn(userId, turnId)).role === "assistant"
+		);
 	} catch {
 		return false;
 	}
 }
 
-export async function ownsV2UserTurn(userId: string, turnId: string): Promise<boolean> {
+export async function ownsUserTurn(
+	userId: string,
+	turnId: string,
+): Promise<boolean> {
 	try {
 		return (await chatV2Repository.getTurn(userId, turnId)).role === "user";
 	} catch {
@@ -49,22 +101,201 @@ export async function ownsV2UserTurn(userId: string, turnId: string): Promise<bo
 	}
 }
 
-export async function sendV2Message(input: {
+/** Skill-invocation instructions are appended to the outbound copy of the
+ * user's message as an extra text part, tagged so display/search always
+ * derive only the user-visible text. */
+const SKILL_INVOCATION_SIGNATURE = "solar-skill-invocation";
+
+function withSkillInvocation(
+	message: Message,
+	invocation: { name: string; content: string },
+): Message {
+	if (message.role !== "user") return message;
+	const base: TextContent[] =
+		typeof message.content === "string"
+			? [{ type: "text", text: message.content }]
+			: message.content.filter(
+					(part): part is TextContent => part.type === "text",
+				);
+	const rest =
+		typeof message.content === "string"
+			? []
+			: message.content.filter((part) => part.type !== "text");
+	return {
+		...message,
+		content: [
+			...base,
+			...rest,
+			{
+				type: "text",
+				text: skillInvocationContext(invocation),
+				textSignature: SKILL_INVOCATION_SIGNATURE,
+			} as TextContent,
+		],
+	};
+}
+
+async function conversationSelection(
+	userId: string,
+	isAdmin: boolean,
+	conversationId: string,
+) {
+	const conversation = await chatV2Repository.getConversation(
+		userId,
+		conversationId,
+	);
+	const selection = await resolveSelection(
+		{
+			provider: conversation.provider ?? undefined,
+			endpointId: conversation.endpointId ?? undefined,
+			modelId: conversation.modelId ?? undefined,
+			api: conversation.modelApi ?? undefined,
+		},
+		userId,
+		isAdmin,
+	);
+	return { conversation, selection };
+}
+
+/** Prefetches and resolves every attachment referenced anywhere in the
+ * conversation's canonical history into base64/extracted-text content, so
+ * `materializeContext`'s (synchronous) attachment resolver can look results
+ * up without any I/O. */
+async function buildAttachmentExpansion(
+	userId: string,
+	conversationId: string,
+	selection: ModelSelection,
+) {
+	const bindings = await chatV2Repository.listMessageAttachments(
+		userId,
+		conversationId,
+	);
+	const attachmentsByMessageId = new Map<
+		string,
+		(typeof bindings)[number]["attachment"][]
+	>();
+	for (const { messageId, attachment } of bindings)
+		attachmentsByMessageId.set(messageId, [
+			...(attachmentsByMessageId.get(messageId) ?? []),
+			attachment,
+		]);
+
+	const documentInput = await documentInputCapabilities(selection);
+	const rows: AttachmentContentRow[] = bindings.map(({ attachment }) => ({
+		id: attachment.id,
+		storageKey: attachment.storageKey,
+		kind: attachment.kind as AttachmentContentRow["kind"],
+		mimeType: attachment.mimeType,
+		filename: attachment.filename,
+	}));
+	const expanded = await expandAttachmentRows(rows, documentInput);
+	const resolvedById = new Map<
+		string,
+		{ type: "image"; data: string } | { type: "text"; text: string }
+	>();
+	for (const [index, row] of rows.entries()) {
+		const part = expanded.parts[index];
+		if (!part) continue;
+		if (part.type === "image")
+			resolvedById.set(row.id, { type: "image", data: part.data });
+		else resolvedById.set(row.id, { type: "text", text: part.text });
+	}
+
+	const available = await listAvailableModels(true);
+	const descriptor = available.find(
+		(m) =>
+			m.provider === selection.provider &&
+			m.endpointId === selection.endpointId &&
+			m.modelId === selection.modelId &&
+			m.api === selection.api,
+	);
+
+	return {
+		attachmentsByMessageId,
+		capabilities: { supportsImages: descriptor?.vision ?? false },
+		resolve: (attachment: { id: string }) =>
+			resolvedById.get(attachment.id) ?? null,
+	};
+}
+
+async function buildOutboundContext(
+	userId: string,
+	conversationId: string,
+	selection: ModelSelection,
+	systemPrompt: string | null,
+) {
+	const canonical = await chatV2Repository.listCanonicalMessages(
+		userId,
+		conversationId,
+	);
+	const compactions = await chatV2Repository.listCompactions(
+		userId,
+		conversationId,
+	);
+	const attachmentExpansion = await buildAttachmentExpansion(
+		userId,
+		conversationId,
+		selection,
+	);
+	const { context: messages, manifest } = materializeContext(
+		conversationId,
+		canonical,
+		compactions,
+		attachmentExpansion,
+	);
+	const skills = skillCatalogContext(await listExposedSkills(userId));
+	const messagesWithCatalog = skills
+		? [
+				{ role: "user" as const, content: skills, timestamp: Date.now() },
+				...messages,
+			]
+		: messages;
+	const context: Context = systemPrompt
+		? { systemPrompt, messages: messagesWithCatalog }
+		: { messages: messagesWithCatalog };
+	return { context, manifest };
+}
+
+export interface SendMessageInput {
 	userId: string;
 	isAdmin: boolean;
 	conversationId: string;
 	text: string;
 	attachmentIds?: string[];
-}): Promise<string> {
-	const conversation = await chatV2Repository.getConversation(input.userId, input.conversationId);
-	const records = await chatV2Repository.listCanonicalMessages(input.userId, input.conversationId);
+	skillName?: string;
+	userLocation?: UserLocation;
+}
+
+async function resolveSkill(userId: string, skillName: string | undefined) {
+	if (!skillName) return null;
+	const skills = await listExposedSkills(userId);
+	const skill = skills.find((candidate) => candidate.name === skillName);
+	if (!skill) throw new Error("skill not found");
+	return { name: skill.name, content: skill.content };
+}
+
+export async function sendMessage(input: SendMessageInput): Promise<string> {
+	const conversation = await chatV2Repository.getConversation(
+		input.userId,
+		input.conversationId,
+	);
+	const records = await chatV2Repository.listCanonicalMessages(
+		input.userId,
+		input.conversationId,
+	);
 	const userTurnId = crypto.randomUUID();
 	const assistantTurnId = crypto.randomUUID();
 	const timestamp = Date.now();
-	const userMessage: Message = { role: "user", content: input.text, timestamp };
+	const invocation = await resolveSkill(input.userId, input.skillName);
+	const rawMessage: Message = { role: "user", content: input.text, timestamp };
+	const userMessage = invocation
+		? withSkillInvocation(rawMessage, invocation)
+		: rawMessage;
+
 	const attachments = new AttachmentService(chatV2Repository);
 	for (const attachmentId of input.attachmentIds ?? [])
 		await chatV2Repository.getAttachment(input.userId, attachmentId);
+
 	await chatV2Repository.createTurn(input.userId, input.conversationId, {
 		id: userTurnId,
 		ordinal: records.length,
@@ -72,13 +303,19 @@ export async function sendV2Message(input: {
 		origin: "text",
 		status: "complete",
 	});
-	await chatV2Repository.appendCanonicalMessages(input.userId, input.conversationId, [{
-		id: userTurnId,
-		turnId: userTurnId,
-		message: userMessage,
-		origin: "text",
-		status: "complete",
-	}]);
+	await chatV2Repository.appendCanonicalMessages(
+		input.userId,
+		input.conversationId,
+		[
+			{
+				id: userTurnId,
+				turnId: userTurnId,
+				message: userMessage,
+				origin: "text",
+				status: "complete",
+			},
+		],
+	);
 	for (const [ordinal, attachmentId] of (input.attachmentIds ?? []).entries())
 		await attachments.bind(
 			input.userId,
@@ -95,50 +332,35 @@ export async function sendV2Message(input: {
 		status: "pending",
 	});
 
-	const selection = await resolveSelection({
-		provider: conversation.provider ?? undefined,
-		endpointId: conversation.endpointId ?? undefined,
-		modelId: conversation.modelId ?? undefined,
-		api: conversation.modelApi ?? undefined,
-	}, input.userId, input.isAdmin);
-	const canonical = await chatV2Repository.listCanonicalMessages(input.userId, input.conversationId);
-	const { context: messages, manifest } = materializeContext(
-		input.conversationId,
-		canonical,
-		await chatV2Repository.listCompactions(input.userId, input.conversationId),
-	);
-	const context: Context = conversation.systemPrompt ? { systemPrompt: conversation.systemPrompt, messages } : { messages };
-	const params: GenerationParams = { systemPrompt: conversation.systemPrompt ?? undefined, documents: [] };
-	const generation = await generationService.startGeneration({
+	await startAssistantTurn({
 		userId: input.userId,
-		conversationId: input.conversationId,
-		turnId: assistantTurnId,
-		provider: selection.provider,
-		api: selection.api,
-		model: selection.modelId,
-		request: { messages },
-		contextManifest: manifest,
-	});
-	startV2Generation({
-		userId: input.userId,
+		isAdmin: input.isAdmin,
 		conversationId: input.conversationId,
 		assistantTurnId,
-		generationId: generation.id,
-		context,
-		selection,
-		params,
+		conversation,
+		userLocation: input.userLocation,
+		titleGeneration:
+			records.length === 0 ? { firstMessage: input.text } : undefined,
 	});
 	return assistantTurnId;
 }
 
-export async function editV2UserMessage(input: {
+export interface EditUserMessageInput {
 	userId: string;
 	isAdmin: boolean;
 	conversationId: string;
 	targetTurnId: string;
 	text: string;
-}): Promise<string> {
-	const { selection, params } = await v2Selection(input.userId, input.isAdmin, input.conversationId);
+	userLocation?: UserLocation;
+}
+
+export async function editUserMessage(
+	input: EditUserMessageInput,
+): Promise<string> {
+	const conversation = await chatV2Repository.getConversation(
+		input.userId,
+		input.conversationId,
+	);
 	const assistantTurnId = crypto.randomUUID();
 	const result = await editService.editUserMessage({
 		userId: input.userId,
@@ -146,53 +368,76 @@ export async function editV2UserMessage(input: {
 		targetTurnId: input.targetTurnId,
 		message: { role: "user", content: input.text, timestamp: Date.now() },
 		assistantTurnId,
-		generation: v2GenerationInput(selection),
+		generation: {
+			provider: "pending",
+			api: "pending",
+			model: "pending",
+			request: {},
+		},
 	});
-	const context = await v2Context(input.userId, input.conversationId);
-	startV2Generation({
+	await startAssistantTurn({
 		userId: input.userId,
+		isAdmin: input.isAdmin,
 		conversationId: input.conversationId,
 		assistantTurnId: result.assistantTurnId,
-		generationId: result.generationId,
-		context,
-		selection,
-		params,
+		conversation,
+		userLocation: input.userLocation,
 	});
 	return result.assistantTurnId;
 }
 
-export async function regenerateV2AssistantTurn(input: {
+export interface RegenerateAssistantTurnInput {
 	userId: string;
 	isAdmin: boolean;
 	conversationId: string;
 	targetTurnId: string;
-}): Promise<string> {
-	const { selection, params } = await v2Selection(input.userId, input.isAdmin, input.conversationId);
+	userLocation?: UserLocation;
+}
+
+export async function regenerateAssistantTurn(
+	input: RegenerateAssistantTurnInput,
+): Promise<string> {
+	const conversation = await chatV2Repository.getConversation(
+		input.userId,
+		input.conversationId,
+	);
 	const assistantTurnId = crypto.randomUUID();
 	const result = await editService.regenerateAssistantTurn({
 		userId: input.userId,
 		conversationId: input.conversationId,
 		targetTurnId: input.targetTurnId,
 		assistantTurnId,
-		generation: v2GenerationInput(selection),
+		generation: {
+			provider: "pending",
+			api: "pending",
+			model: "pending",
+			request: {},
+		},
 	});
-	const context = await v2Context(input.userId, input.conversationId);
-	startV2Generation({
+	await startAssistantTurn({
 		userId: input.userId,
+		isAdmin: input.isAdmin,
 		conversationId: input.conversationId,
 		assistantTurnId: result.assistantTurnId,
-		generationId: result.generationId,
-		context,
-		selection,
-		params,
+		conversation,
+		userLocation: input.userLocation,
 	});
 	return result.assistantTurnId;
 }
 
-export async function stopV2Generation(userId: string, assistantTurnId: string): Promise<boolean> {
+export async function stopGeneration(
+	userId: string,
+	assistantTurnId: string,
+): Promise<boolean> {
 	try {
-		const generation = await chatV2Repository.getGenerationForTurn(userId, assistantTurnId);
-		const stopped = await generationService.stopGeneration(userId, generation.id);
+		const generation = await chatV2Repository.getGenerationForTurn(
+			userId,
+			assistantTurnId,
+		);
+		const stopped = await generationService.stopGeneration(
+			userId,
+			generation.id,
+		);
 		if (stopped) generationManager.stop(assistantTurnId);
 		return stopped;
 	} catch {
@@ -200,96 +445,211 @@ export async function stopV2Generation(userId: string, assistantTurnId: string):
 	}
 }
 
-async function v2Selection(userId: string, isAdmin: boolean, conversationId: string) {
-	const conversation = await chatV2Repository.getConversation(userId, conversationId);
-	const selection = await resolveSelection({
-		provider: conversation.provider ?? undefined,
-		endpointId: conversation.endpointId ?? undefined,
-		modelId: conversation.modelId ?? undefined,
-		api: conversation.modelApi ?? undefined,
-	}, userId, isAdmin);
-	return {
-		selection,
-		params: { systemPrompt: conversation.systemPrompt ?? undefined, documents: [] } satisfies GenerationParams,
-	};
-}
-
-async function v2Context(userId: string, conversationId: string): Promise<Context> {
-	const conversation = await chatV2Repository.getConversation(userId, conversationId);
-	const canonical = await chatV2Repository.listCanonicalMessages(userId, conversationId);
-	const { context: messages } = materializeContext(
-		conversationId,
-		canonical,
-		await chatV2Repository.listCompactions(userId, conversationId),
+async function startAssistantTurn(input: {
+	userId: string;
+	isAdmin: boolean;
+	conversationId: string;
+	assistantTurnId: string;
+	conversation: Awaited<ReturnType<typeof chatV2Repository.getConversation>>;
+	userLocation?: UserLocation;
+	titleGeneration?: { firstMessage: string };
+}): Promise<void> {
+	const selection = await resolveSelection(
+		{
+			provider: input.conversation.provider ?? undefined,
+			endpointId: input.conversation.endpointId ?? undefined,
+			modelId: input.conversation.modelId ?? undefined,
+			api: input.conversation.modelApi ?? undefined,
+		},
+		input.userId,
+		input.isAdmin,
 	);
-	return conversation.systemPrompt ? { systemPrompt: conversation.systemPrompt, messages } : { messages };
-}
+	await chatV2Repository.setConversationModel(
+		input.userId,
+		input.conversationId,
+		{
+			provider: selection.provider,
+			endpointId: selection.endpointId,
+			modelId: selection.modelId,
+			modelApi: selection.api,
+		},
+	);
 
-function v2GenerationInput(selection: ModelSelection) {
-	return {
+	const capabilities = await getModelCapabilities(selection);
+	const systemPrompt =
+		renderBuiltinPromptInterpolations(
+			input.conversation.systemPrompt,
+			input.userLocation,
+		) ?? null;
+	const { context, manifest } = await buildOutboundContext(
+		input.userId,
+		input.conversationId,
+		selection,
+		systemPrompt,
+	);
+
+	const availableTools = await toolProvider.resolve({
+		userId: input.userId,
+		conversationId: input.conversationId,
+		userLocation: input.userLocation,
+	});
+	const resolvedTools = input.conversation.autoExecuteTools
+		? availableTools
+		: availableTools.filter((tool) => tool.tool.name === "read_skill");
+	context.tools = resolvedTools.map(({ tool }) => tool);
+
+	const params: GenerationParams = {
+		systemPrompt: systemPrompt ?? undefined,
+		reasoningEffort:
+			input.conversation.reasoningEffort ??
+			capabilities.defaultReasoningEffort ??
+			undefined,
+		reasoningSummary: Boolean(input.conversation.reasoningSummary),
+		verbosity:
+			input.conversation.verbosity ??
+			capabilities.defaultVerbosity ??
+			undefined,
+		documents: [],
+	};
+
+	const titleTask = input.titleGeneration
+		? {
+				firstMessage: input.titleGeneration.firstMessage,
+				prompt: await getTitlePrompt(),
+				selection: await resolveTaskModelOrFallback(selection),
+				persistTitle: async (title: string) =>
+					chatV2Repository.setConversationTitleIfDefault(
+						input.userId,
+						input.conversationId,
+						title,
+					),
+			}
+		: undefined;
+
+	const generation = await generationService.startGeneration({
+		userId: input.userId,
+		conversationId: input.conversationId,
+		turnId: input.assistantTurnId,
 		provider: selection.provider,
 		api: selection.api,
 		model: selection.modelId,
-		request: { messages: [] },
-	};
-}
+		request: { messages: context.messages },
+		contextManifest: manifest,
+	});
 
-function startV2Generation(input: {
-	userId: string;
-	conversationId: string;
-	assistantTurnId: string;
-	generationId: string;
-	context: Context;
-	selection: ModelSelection;
-	params: GenerationParams;
-}): void {
 	generationManager.start({
 		conversationId: input.conversationId,
 		messageId: input.assistantTurnId,
-		context: input.context,
-		selection: input.selection,
-		params: input.params,
-		persistExternally: async ({ parts, status, text }) => {
+		context,
+		selection,
+		params,
+		tools: resolvedTools,
+		titleGeneration: titleTask,
+		persist: async ({ steps, parts, status, text }) => {
 			if (status === "error") {
-				await generationService.failGeneration(input.userId, input.generationId, new Error(text));
+				await generationService.failGeneration(
+					input.userId,
+					generation.id,
+					new Error(text),
+				);
 				return;
 			}
-			const message = canonicalAssistant(parts, input.selection, text);
-			const completed = await generationService.completeGeneration(input.userId, input.generationId, [{
-				id: input.assistantTurnId,
-				turnId: input.assistantTurnId,
-				message,
-				origin: "text",
-				status: "complete",
-			}], message.usage, message.stopReason);
+			const stepMessages = (steps as Message[]).filter(
+				(step) =>
+					step && (step.role === "assistant" || step.role === "toolResult"),
+			);
+			const finalMessage = canonicalAssistant(parts, selection, text);
+			const orderedMessages = [...stepMessages, finalMessage];
+			const completed = await generationService.completeGeneration(
+				input.userId,
+				generation.id,
+				orderedMessages.map((message, index) => ({
+					id:
+						index === orderedMessages.length - 1
+							? input.assistantTurnId
+							: crypto.randomUUID(),
+					turnId: input.assistantTurnId,
+					message,
+					origin: "text" as const,
+					status: "complete" as const,
+				})),
+				finalMessage.usage,
+				finalMessage.stopReason,
+			);
 			if (completed)
-				void enqueueCompactionForCompletedGeneration(
-					chatV2Repository,
+				void enqueueAndRunCompaction(
 					input.userId,
 					input.conversationId,
-				)
-					.then((jobId) => {
-						// Compaction is asynchronous relative to the user's request, but
-						// time-sensitive: begin running the job immediately rather than
-						// waiting on any external scheduler.
-						if (!jobId) return;
-						void new CompactionService(chatV2Repository)
-							.run(input.userId, jobId, createV2Summarizer(input.selection))
-							.catch((error) =>
-								logger
-									.withError(error)
-									.withMetadata({ conversationId: input.conversationId, jobId })
-									.warn("chat-v2 compaction run failed"),
-							);
-					})
-					.catch((error) =>
-						logger.withError(error).withMetadata({ conversationId: input.conversationId }).warn("chat-v2 compaction enqueue failed"),
-					);
+					selection,
+				).catch((error) =>
+					logger
+						.withError(error)
+						.withMetadata({ conversationId: input.conversationId })
+						.warn("chat-v2 compaction failed"),
+				);
 		},
 	});
 }
 
-function canonicalAssistant(parts: unknown, selection: { provider: string; api: string; modelId: string }, text: string): AssistantMessage {
+const FALLBACK_CONTEXT_WINDOW_TOKENS = 128_000;
+
+/** Real per-model thresholds (admin-configured `contextPolicy`) when set;
+ * otherwise a conservative default derived from the model's context window,
+ * matching pi-agent-core's own harness defaults. */
+async function resolveCompactionPolicy(
+	selection: ModelSelection,
+): Promise<CompactionTriggerPolicy> {
+	if (selection.provider !== "mock") {
+		const resolved = await resolveModel(selection);
+		if (resolved.contextPolicy) {
+			const policy = resolved.contextPolicy;
+			return policy.enabled
+				? {
+						enabled: true,
+						softTriggerTokens: policy.softTriggerTokens,
+						targetTokens: policy.targetTokens,
+					}
+				: { enabled: false, softTriggerTokens: 0, targetTokens: 0 };
+		}
+	}
+	const capabilities = await getModelCapabilities(selection);
+	const contextWindow =
+		capabilities.contextWindow ?? FALLBACK_CONTEXT_WINDOW_TOKENS;
+	return {
+		enabled: true,
+		softTriggerTokens: Math.max(
+			contextWindow - DEFAULT_COMPACTION_SETTINGS.reserveTokens,
+			0,
+		),
+		targetTokens: DEFAULT_COMPACTION_SETTINGS.keepRecentTokens,
+	};
+}
+
+async function enqueueAndRunCompaction(
+	userId: string,
+	conversationId: string,
+	selection: ModelSelection,
+): Promise<void> {
+	const policy = await resolveCompactionPolicy(selection);
+	const jobId = await enqueueCompactionForCompletedGeneration(
+		chatV2Repository,
+		userId,
+		conversationId,
+		policy,
+	);
+	if (!jobId) return;
+	await new CompactionService(chatV2Repository).run(
+		userId,
+		jobId,
+		createV2Summarizer(selection),
+	);
+}
+
+function canonicalAssistant(
+	parts: unknown,
+	selection: { provider: string; api: string; modelId: string },
+	text: string,
+): AssistantMessage {
 	if (parts && typeof parts === "object") {
 		const message = parts as AssistantMessage;
 		return { ...message, usage: canonicalUsage(message.usage) };
@@ -313,20 +673,29 @@ function canonicalUsage(usage: AssistantMessage["usage"] | undefined) {
 		...usage,
 		cacheRead: usage?.cacheRead ?? 0,
 		cacheWrite: usage?.cacheWrite ?? 0,
-		totalTokens: usage?.totalTokens ?? (usage?.input ?? 0) + (usage?.output ?? 0),
+		totalTokens:
+			usage?.totalTokens ?? (usage?.input ?? 0) + (usage?.output ?? 0),
 		cost: { ...defaults.cost, ...usage?.cost },
 	};
 }
 
-export async function loadV2Messages(userId: string, conversationId: string) {
-	const records = await chatV2Repository.listCanonicalMessages(userId, conversationId);
-	const attachmentsByMessageId = new Map<string, import("../chat-v2/types").AttachmentRecord[]>();
-	for (const { messageId, attachment } of await chatV2Repository.listMessageAttachments(userId, conversationId))
+export async function loadMessages(userId: string, conversationId: string) {
+	const records = await chatV2Repository.listCanonicalMessages(
+		userId,
+		conversationId,
+	);
+	const attachmentsByMessageId = new Map<
+		string,
+		import("../chat-v2/types").AttachmentRecord[]
+	>();
+	for (const {
+		messageId,
+		attachment,
+	} of await chatV2Repository.listMessageAttachments(userId, conversationId))
 		attachmentsByMessageId.set(messageId, [
 			...(attachmentsByMessageId.get(messageId) ?? []),
 			attachment,
 		]);
-	// Keep the public route's history reconstruction on the canonical v2 loader.
 	await loadCanonicalHistory(chatV2Repository, userId, conversationId);
 	return projectVisibleTurns(records, attachmentsByMessageId).map((turn) => ({
 		id: turn.id,
@@ -348,7 +717,7 @@ export async function loadV2Messages(userId: string, conversationId: string) {
 	}));
 }
 
-export async function createV2Conversation(input: {
+export async function createConversation(input: {
 	userId: string;
 	title: string;
 	provider: string | null;

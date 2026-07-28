@@ -13,6 +13,7 @@ import type {
 	V2AttachmentTable,
 	V2ContextCompactionJobTable,
 	V2ContextCompactionTable,
+	V2ConversationMcpServerTable,
 	V2ConversationMessageTable,
 	V2ConversationTable,
 	V2ConversationTagTable,
@@ -293,4 +294,5 @@ export interface Database {
 	v2_voice_turn: V2VoiceTurnTable;
 	v2_context_compaction: V2ContextCompactionTable;
 	v2_context_compaction_job: V2ContextCompactionJobTable;
+	v2_conversation_mcp_server: V2ConversationMcpServerTable;
 }

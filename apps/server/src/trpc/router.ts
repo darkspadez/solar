@@ -8,11 +8,7 @@ import {
 } from "../auth";
 import { config } from "../config";
 import { db, sqlite } from "../db";
-import {
-	deleteAttachmentFilesForMessages,
-	deleteAttachmentFilesForUser,
-} from "../chat/attachments";
-import { generationManager } from "../chat/generationManager";
+import { deleteAttachmentFilesForUser } from "../chat/attachments";
 import {
 	getAdminDefault,
 	getModelCapabilities,
@@ -38,9 +34,7 @@ import {
 } from "../chat/catalog";
 import type { TrpcContext } from "./context";
 import { getLogLevel, setLogLevel, type SolarLogLevel } from "../logger";
-import { contextRuntime, ContextCompactionError } from "../context/runtime";
 import { testMcpServer } from "../chat/mcp";
-import { ContextRepository } from "../context/repository";
 import {
 	contextGlobalSettingsInputSchema,
 	CONTEXT_GLOBAL_SETTINGS_VERSION,
@@ -48,7 +42,6 @@ import {
 	getContextGlobalSettings,
 	setContextGlobalSettings,
 } from "../context/settings";
-import { canonicalPolicyProvider } from "../context/policy";
 import {
 	getPasteSettings,
 	PASTE_SETTINGS_VERSION,
@@ -56,15 +49,16 @@ import {
 	setPasteSettings,
 } from "../chat/pasteSettings";
 import { SourceCategoryResolver } from "../sources/categories";
-import { parseSkill, parseSkillInvocation } from "../chat/skills";
+import { parseSkill } from "../chat/skills";
+import { chatV2Repository, loadMessages } from "../chat/v2Live";
 import {
-	chatV2Repository,
-	createV2Conversation,
-	isChatV2Enabled,
-	loadV2Messages,
-} from "../chat/v2Live";
-import { ChatV2ExportService, type ChatV2ExportBundle } from "../chat-v2/export";
-import { ChatV2ImportService, ChatV2ImportValidationError } from "../chat-v2/import";
+	ChatV2ExportService,
+	type ChatV2ExportBundle,
+} from "../chat-v2/export";
+import {
+	ChatV2ImportService,
+	ChatV2ImportValidationError,
+} from "../chat-v2/import";
 import { rebuildSearchProjection, searchProjection } from "../chat-v2/search";
 
 const t = initTRPC.context<TrpcContext>().create();
@@ -86,159 +80,30 @@ export const adminProcedure = protectedProcedure.use(({ ctx, next }) => {
 	return next({ ctx });
 });
 
-/** Asserts the conversation exists and belongs to the user; else NOT_FOUND. */
-async function assertOwnsConversation(userId: string, conversationId: string) {
-	const convo = await db
-		.selectFrom("conversation")
-		.select("id")
-		.where("id", "=", conversationId)
-		.where("userId", "=", userId)
-		.executeTakeFirst();
-	if (!convo) throw new TRPCError({ code: "NOT_FOUND" });
-}
-
-/** Pulls the persisted "thinking" text out of a full pi AssistantMessage JSON. */
-function extractReasoning(parts: string | null): string | null {
-	if (!parts) return null;
-	try {
-		const parsed = JSON.parse(parts) as {
-			content?: { type: string; thinking?: string }[];
-		};
-		const thinking = parsed.content?.find((c) => c.type === "thinking");
-		return thinking?.thinking ?? null;
-	} catch {
-		return null;
-	}
-}
-
-function reconstructPartsFromSteps(
-	rawParts: string | null,
-	steps?: Array<{ data: string }>,
-): string | null {
-	if (!steps || steps.length === 0) return rawParts;
-
-	const combinedContent: unknown[] = [];
-	for (const step of steps) {
-		try {
-			const parsed = JSON.parse(step.data) as {
-				role?: string;
-				content?: unknown[];
-			};
-			if (parsed.role === "assistant" && Array.isArray(parsed.content)) {
-				combinedContent.push(...parsed.content);
-			}
-		} catch {
-			// ignore malformed step
-		}
-	}
-
-	if (combinedContent.length === 0) return rawParts;
-
-	let solarToolCalls: unknown = [];
-	let baseObject: Record<string, unknown> = {};
-	if (rawParts) {
-		try {
-			baseObject = JSON.parse(rawParts) as Record<string, unknown>;
-			if (Array.isArray(baseObject.solarToolCalls)) {
-				solarToolCalls = baseObject.solarToolCalls;
-			}
-		} catch {
-			// fallback
-		}
-	}
-
-	return JSON.stringify({
-		...baseObject,
-		role: "assistant",
-		content: combinedContent,
-		solarToolCalls,
-	});
-}
-
-function extractToolCalls(parts: string | null) {
-	if (!parts) return [];
-	try {
-		const parsed = JSON.parse(parts) as { solarToolCalls?: unknown };
-		return Array.isArray(parsed.solarToolCalls) ? parsed.solarToolCalls : [];
-	} catch {
-		return [];
-	}
-}
-
-function contextModelFamily(provider: string, modelId: string) {
-	const identity = `${provider} ${modelId}`.toLowerCase();
-	if (identity.includes("claude")) return "claude-1m";
-	if (identity.includes("gpt-5.6")) return "gpt-5.6";
-	return undefined;
-}
-
 const conversationRouter = router({
 	list: protectedProcedure.query(async ({ ctx }) => {
-		if (isChatV2Enabled()) {
-			const conversations = await chatV2Repository.listConversations(ctx.user.id);
-			return conversations.map((conversation) => ({
-				id: conversation.id,
-				title: conversation.title,
-				folderId: conversation.folderId,
-				provider: conversation.provider,
-				endpointId: conversation.endpointId,
-				modelId: conversation.modelId,
-				modelApi: conversation.modelApi,
-				createdAt: conversation.createdAt,
-				updatedAt: conversation.updatedAt,
-				tags: [],
-			}));
-		}
-		const conversations = await db
-			.selectFrom("conversation")
-			.select([
-				"id",
-				"title",
-				"folderId",
-				"provider",
-				"endpointId",
-				"modelId",
-				"modelApi",
-				"createdAt",
-				"updatedAt",
-			])
-			.where("userId", "=", ctx.user.id)
-			// Hide abandoned drafts: only surface conversations that have a turn.
-			.where((eb) =>
-				eb.exists(
-					eb
-						.selectFrom("message")
-						.select("message.id")
-						.whereRef("message.conversationId", "=", "conversation.id"),
-				),
-			)
-			.orderBy("updatedAt", "desc")
-			.execute();
-
-		const tagRows = await db
-			.selectFrom("conversation_tag")
-			.innerJoin("tag", "tag.id", "conversation_tag.tagId")
-			.select([
-				"conversation_tag.conversationId",
-				"tag.id as tagId",
-				"tag.name",
-			])
-			.where("tag.userId", "=", ctx.user.id)
-			.execute();
-
-		const tagsByConversation = new Map<
-			string,
-			{ id: string; name: string }[]
-		>();
-		for (const r of tagRows) {
-			const list = tagsByConversation.get(r.conversationId) ?? [];
-			list.push({ id: r.tagId, name: r.name });
-			tagsByConversation.set(r.conversationId, list);
-		}
-
-		return conversations.map((c) => ({
-			...c,
-			tags: tagsByConversation.get(c.id) ?? [],
+		const [conversations, tags] = await Promise.all([
+			chatV2Repository.listConversations(ctx.user.id),
+			db
+				.selectFrom("v2_tag")
+				.select(["id", "name"])
+				.where("userId", "=", ctx.user.id)
+				.execute(),
+		]);
+		const tagById = new Map(tags.map((tag) => [tag.id, tag]));
+		return conversations.map((conversation) => ({
+			id: conversation.id,
+			title: conversation.title,
+			folderId: conversation.folderId,
+			provider: conversation.provider,
+			endpointId: conversation.endpointId,
+			modelId: conversation.modelId,
+			modelApi: conversation.modelApi,
+			createdAt: conversation.createdAt,
+			updatedAt: conversation.updatedAt,
+			tags: conversation.tagIds
+				.map((tagId) => tagById.get(tagId))
+				.filter((tag): tag is { id: string; name: string } => Boolean(tag)),
 		}));
 	}),
 
@@ -252,23 +117,7 @@ const conversationRouter = router({
 			}),
 		)
 		.mutation(async ({ ctx, input }) => {
-			// Discard the user's abandoned drafts (conversations with no turns) so
-			// they never accumulate; cascades clean up any related rows.
-			await db
-				.deleteFrom("conversation")
-				.where("userId", "=", ctx.user.id)
-				.where((eb) =>
-					eb.not(
-						eb.exists(
-							eb
-								.selectFrom("message")
-								.select("message.id")
-								.whereRef("message.conversationId", "=", "conversation.id"),
-						),
-					),
-				)
-				.execute();
-			const id = crypto.randomUUID();
+			await chatV2Repository.deleteAbandonedConversations(ctx.user.id);
 			const presetId =
 				input.presetId ?? (await getUserDefaultPreset(ctx.user.id));
 			// Snapshot the preset (model + system prompt + reasoning params) onto the
@@ -280,7 +129,7 @@ const conversationRouter = router({
 				modelApi: string | null;
 				systemPrompt: string | null;
 				reasoningEffort: string | null;
-				reasoningSummary: number;
+				reasoningSummary: boolean;
 				verbosity: string | null;
 			} = {
 				provider: null,
@@ -289,7 +138,7 @@ const conversationRouter = router({
 				modelApi: null,
 				systemPrompt: null,
 				reasoningEffort: null,
-				reasoningSummary: 0,
+				reasoningSummary: false,
 				verbosity: null,
 			};
 			if (presetId) {
@@ -319,36 +168,22 @@ const conversationRouter = router({
 						modelApi: preset.modelApi,
 						systemPrompt: preset.systemPrompt,
 						reasoningEffort: preset.reasoningEffort,
-						reasoningSummary: preset.reasoningSummary,
+						reasoningSummary: Boolean(preset.reasoningSummary),
 						verbosity: preset.verbosity,
 					};
 				}
 			}
 			const defaultDisplayMode = await getUserDefaultDisplayMode(ctx.user.id);
-			if (isChatV2Enabled()) {
-				const id = await createV2Conversation({
-					userId: ctx.user.id,
-					title: input.title ?? "New conversation",
-					provider: snapshot.provider,
-					endpointId: snapshot.endpointId,
-					modelId: snapshot.modelId,
-					modelApi: snapshot.modelApi,
-					systemPrompt: snapshot.systemPrompt,
-				});
-				return { id };
-			}
-			await db
-				.insertInto("conversation")
-				.values({
-					id,
-					userId: ctx.user.id,
+			const conversation = await chatV2Repository.createConversation(
+				ctx.user.id,
+				{
 					title: input.title ?? "New conversation",
 					folderId: input.folderId ?? null,
 					displayMode: defaultDisplayMode,
 					...snapshot,
-				})
-				.execute();
-			return { id };
+				},
+			);
+			return { id: conversation.id };
 		}),
 
 	rename: protectedProcedure
@@ -356,79 +191,63 @@ const conversationRouter = router({
 			z.object({ id: z.string(), title: z.string().trim().min(1).max(200) }),
 		)
 		.mutation(async ({ ctx, input }) => {
-			if (isChatV2Enabled()) {
-				try {
-					await chatV2Repository.renameConversation(ctx.user.id, input.id, input.title);
-				} catch {
-					throw new TRPCError({ code: "NOT_FOUND" });
-				}
-				return;
+			try {
+				await chatV2Repository.renameConversation(
+					ctx.user.id,
+					input.id,
+					input.title,
+				);
+			} catch {
+				throw new TRPCError({ code: "NOT_FOUND" });
 			}
-			await assertOwnsConversation(ctx.user.id, input.id);
-			await db
-				.updateTable("conversation")
-				.set({ title: input.title })
-				.where("id", "=", input.id)
-				.execute();
 		}),
 
 	remove: protectedProcedure
 		.input(z.object({ id: z.string() }))
 		.mutation(async ({ ctx, input }) => {
-			if (isChatV2Enabled()) {
-				try {
-					await chatV2Repository.deleteConversation(ctx.user.id, input.id);
-				} catch {
-					throw new TRPCError({ code: "NOT_FOUND" });
-				}
-				return;
+			try {
+				await chatV2Repository.deleteConversation(ctx.user.id, input.id);
+			} catch {
+				throw new TRPCError({ code: "NOT_FOUND" });
 			}
-			await assertOwnsConversation(ctx.user.id, input.id);
-			const messages = await db
-				.selectFrom("message")
-				.select("id")
-				.where("conversationId", "=", input.id)
-				.execute();
-			await deleteAttachmentFilesForMessages(messages.map((m) => m.id));
-			await db.deleteFrom("conversation").where("id", "=", input.id).execute();
 		}),
 
 	contextState: protectedProcedure
 		.input(z.object({ conversationId: z.string() }))
 		.query(async ({ ctx, input }) => {
-			await assertOwnsConversation(ctx.user.id, input.conversationId);
-			const state = await new ContextRepository(db).getState(
+			try {
+				await chatV2Repository.getConversation(
+					ctx.user.id,
+					input.conversationId,
+				);
+			} catch {
+				throw new TRPCError({ code: "NOT_FOUND" });
+			}
+			const compactions = await chatV2Repository.listCompactions(
+				ctx.user.id,
 				input.conversationId,
 			);
-			const latestEstimate = await db
-				.selectFrom("provider_call_telemetry")
-				.select([
-					"compactionTokensBefore",
-					"compactionTokensAfter",
-					"createdAt",
-				])
-				.where("conversationId", "=", input.conversationId)
-				.where("purpose", "=", "compaction")
-				.where("compactionTokensBefore", "is not", null)
-				.orderBy("createdAt", "desc")
-				.executeTakeFirst();
+			const jobs = await chatV2Repository.listCompactionJobs(
+				ctx.user.id,
+				input.conversationId,
+			);
+			const failedJob = jobs.find((job) => job.status === "failed");
+			const activeJob = jobs.find(
+				(job) => job.status === "queued" || job.status === "running",
+			);
+			const latest = compactions.at(-1);
 			return {
-				state:
-					state?.jobStatus === "failed"
-						? "failed"
-						: state?.jobStatus === "running" || state?.jobStatus === "queued"
-							? "running"
-							: "idle",
-				estimatedTokens: latestEstimate?.compactionTokensBefore ?? null,
-				summarized: Boolean(state?.summary),
-				jobError: state?.jobError ?? null,
-				summaryEvent: state?.summary
+				state: failedJob ? "failed" : activeJob ? "running" : "idle",
+				estimatedTokens: latest?.tokensBefore ?? null,
+				summarized: compactions.length > 0,
+				jobError: failedJob?.errorMessage ?? null,
+				summaryEvent: latest
 					? {
-							tokensBefore: latestEstimate?.compactionTokensBefore ?? null,
-							tokensAfter: latestEstimate?.compactionTokensAfter ?? null,
-							revision: state.summaryRevision,
-							createdAt: latestEstimate?.createdAt ?? null,
-							retainedMessageBoundaryId: state.retainedMessageBoundaryId,
+							tokensBefore: latest.tokensBefore,
+							tokensAfter: latest.tokensAfter,
+							revision: compactions.length,
+							createdAt: latest.createdAt,
+							retainedMessageBoundaryId: latest.lastMessageId,
 						}
 					: null,
 			};
@@ -437,12 +256,16 @@ const conversationRouter = router({
 	metrics: protectedProcedure
 		.input(z.object({ conversationId: z.string() }))
 		.query(async ({ ctx, input }) => {
-			await assertOwnsConversation(ctx.user.id, input.conversationId);
-			const conversation = await db
-				.selectFrom("conversation")
-				.select(["provider", "endpointId", "modelId", "modelApi"])
-				.where("id", "=", input.conversationId)
-				.executeTakeFirstOrThrow();
+			const conversation = await (async () => {
+				try {
+					return await chatV2Repository.getConversation(
+						ctx.user.id,
+						input.conversationId,
+					);
+				} catch {
+					throw new TRPCError({ code: "NOT_FOUND" });
+				}
+			})();
 			const selection = await resolveSelection(
 				{
 					provider: conversation.provider ?? undefined,
@@ -458,17 +281,6 @@ const conversationRouter = router({
 					? undefined
 					: await resolveModel(selection);
 			const contextWindowTokens = resolved?.model.contextWindow ?? 128_000;
-			const modelFamily = contextModelFamily(
-				selection.provider,
-				selection.modelId,
-			);
-			const policy = await new ContextRepository(db).resolvePolicy({
-				provider: canonicalPolicyProvider(modelFamily) ?? selection.provider,
-				modelId: selection.modelId,
-				modelFamily,
-				contextWindowTokens,
-				override: resolved?.contextPolicy,
-			});
 			const [latest, totals] = await Promise.all([
 				db
 					.selectFrom("provider_call_telemetry")
@@ -491,7 +303,7 @@ const conversationRouter = router({
 						? null
 						: latest.inputTokens + (latest.cacheReadTokens ?? 0),
 				contextWindowTokens,
-				compactionAtTokens: policy.softTriggerTokens,
+				compactionAtTokens: Math.round(contextWindowTokens * 0.75),
 				costMicros: totals.costMicros,
 			};
 		}),
@@ -499,19 +311,16 @@ const conversationRouter = router({
 	compact: protectedProcedure
 		.input(z.object({ conversationId: z.string() }))
 		.mutation(async ({ ctx, input }) => {
-			await assertOwnsConversation(ctx.user.id, input.conversationId);
-			const conversation = await db
-				.selectFrom("conversation")
-				.select([
-					"provider",
-					"endpointId",
-					"modelId",
-					"modelApi",
-					"systemPrompt",
-				])
-				.where("id", "=", input.conversationId)
-				.executeTakeFirstOrThrow();
-
+			const conversation = await (async () => {
+				try {
+					return await chatV2Repository.getConversation(
+						ctx.user.id,
+						input.conversationId,
+					);
+				} catch {
+					throw new TRPCError({ code: "NOT_FOUND" });
+				}
+			})();
 			const selection = await resolveSelection(
 				{
 					provider: conversation.provider ?? undefined,
@@ -522,23 +331,54 @@ const conversationRouter = router({
 				ctx.user.id,
 				ctx.user.role === "admin",
 			);
-
-			try {
-				await contextRuntime.compactManual(
-					input.conversationId,
-					selection,
-					conversation.systemPrompt,
-				);
-				return { success: true };
-			} catch (error) {
-				if (error instanceof ContextCompactionError) {
-					throw new TRPCError({
-						code: "BAD_REQUEST",
-						message: error.message,
-					});
-				}
-				throw error;
+			const messages = await chatV2Repository.listCanonicalMessages(
+				ctx.user.id,
+				input.conversationId,
+			);
+			const compactions = await chatV2Repository.listCompactions(
+				ctx.user.id,
+				input.conversationId,
+			);
+			const compactedThrough = compactions.reduce(
+				(last, compaction) =>
+					Math.max(
+						last,
+						messages.findIndex(
+							(message) => message.id === compaction.lastMessageId,
+						),
+					),
+				-1,
+			);
+			const first = compactedThrough + 1;
+			const last = messages.length - 3;
+			if (last - first < 1) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "No compactable history available",
+				});
 			}
+			const { CompactionService } = await import("../chat-v2/compaction");
+			const { createV2Summarizer } = await import("../chat-v2/summarizer");
+			const job = await new CompactionService(chatV2Repository).enqueue(
+				ctx.user.id,
+				input.conversationId,
+				{
+					firstMessageId: messages[first]!.id,
+					lastMessageId: messages[last]!.id,
+				},
+			);
+			const result = await new CompactionService(chatV2Repository).run(
+				ctx.user.id,
+				job.id,
+				createV2Summarizer(selection),
+			);
+			if (result === "stale") {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Conversation changed during compaction; try again",
+				});
+			}
+			return { success: true };
 		}),
 
 	setModel: protectedProcedure
@@ -552,7 +392,6 @@ const conversationRouter = router({
 			}),
 		)
 		.mutation(async ({ ctx, input }) => {
-			await assertOwnsConversation(ctx.user.id, input.id);
 			// Only allow selecting a model the user actually has access to.
 			const available = await listAvailableModels(ctx.user.role === "admin");
 			const ok = available.some(
@@ -567,16 +406,16 @@ const conversationRouter = router({
 					code: "BAD_REQUEST",
 					message: "model unavailable",
 				});
-			await db
-				.updateTable("conversation")
-				.set({
+			try {
+				await chatV2Repository.setConversationModel(ctx.user.id, input.id, {
 					provider: input.provider,
 					endpointId: input.endpointId,
 					modelId: input.modelId,
 					modelApi: input.api,
-				})
-				.where("id", "=", input.id)
-				.execute();
+				});
+			} catch {
+				throw new TRPCError({ code: "NOT_FOUND" });
+			}
 		}),
 
 	setGenerationSettings: protectedProcedure
@@ -591,19 +430,13 @@ const conversationRouter = router({
 			}),
 		)
 		.mutation(async ({ ctx, input }) => {
-			await assertOwnsConversation(ctx.user.id, input.id);
-			const conversation = await db
-				.selectFrom("conversation")
-				.select([
-					"provider",
-					"endpointId",
-					"modelId",
-					"modelApi",
-					"presetReasoningEffort",
-					"presetVerbosity",
-				])
-				.where("id", "=", input.id)
-				.executeTakeFirstOrThrow();
+			const conversation = await (async () => {
+				try {
+					return await chatV2Repository.getConversation(ctx.user.id, input.id);
+				} catch {
+					throw new TRPCError({ code: "NOT_FOUND" });
+				}
+			})();
 			const selection = await resolveSelection(
 				{
 					provider: conversation.provider ?? undefined,
@@ -635,202 +468,109 @@ const conversationRouter = router({
 					message: "verbosity unavailable",
 				});
 			}
-			await db
-				.updateTable("conversation")
-				.set({
-					...(input.reasoningEffort !== undefined
-						? { reasoningEffort: input.reasoningEffort }
-						: {}),
-					...(input.verbosity !== undefined
-						? { verbosity: input.verbosity }
-						: {}),
-				})
-				.where("id", "=", input.id)
-				.execute();
+			await chatV2Repository.setConversationGenerationSettings(
+				ctx.user.id,
+				input.id,
+				{
+					reasoningEffort: input.reasoningEffort,
+					verbosity: input.verbosity,
+				},
+			);
 		}),
 
 	move: protectedProcedure
 		.input(z.object({ id: z.string(), folderId: z.string().nullable() }))
 		.mutation(async ({ ctx, input }) => {
-			await assertOwnsConversation(ctx.user.id, input.id);
-			await db
-				.updateTable("conversation")
-				.set({ folderId: input.folderId })
-				.where("id", "=", input.id)
-				.execute();
+			try {
+				await chatV2Repository.setConversationFolder(
+					ctx.user.id,
+					input.id,
+					input.folderId,
+				);
+			} catch {
+				throw new TRPCError({ code: "NOT_FOUND" });
+			}
 		}),
 
 	setTags: protectedProcedure
 		.input(z.object({ id: z.string(), tagIds: z.array(z.string()) }))
 		.mutation(async ({ ctx, input }) => {
-			await assertOwnsConversation(ctx.user.id, input.id);
-			// Only accept tags the user actually owns.
-			const owned = input.tagIds.length
-				? await db
-						.selectFrom("tag")
-						.select("id")
-						.where("userId", "=", ctx.user.id)
-						.where("id", "in", input.tagIds)
-						.execute()
-				: [];
-			await db
-				.deleteFrom("conversation_tag")
-				.where("conversationId", "=", input.id)
-				.execute();
-			if (owned.length) {
-				await db
-					.insertInto("conversation_tag")
-					.values(owned.map((t) => ({ conversationId: input.id, tagId: t.id })))
-					.execute();
+			try {
+				await chatV2Repository.setConversationTags(
+					ctx.user.id,
+					input.id,
+					input.tagIds,
+				);
+			} catch {
+				throw new TRPCError({ code: "NOT_FOUND" });
 			}
 		}),
 
 	search: protectedProcedure
 		.input(z.object({ query: z.string().trim().min(1) }))
 		.query(async ({ ctx, input }) => {
-			if (isChatV2Enabled()) {
-				const conversations = await chatV2Repository.listConversations(ctx.user.id);
-				const entries = (
-					await Promise.all(
-						conversations.map((conversation) =>
-							chatV2Repository.listCanonicalMessages(ctx.user.id, conversation.id),
+			const conversations = await chatV2Repository.listConversations(
+				ctx.user.id,
+			);
+			const entries = (
+				await Promise.all(
+					conversations.map((conversation) =>
+						chatV2Repository.listCanonicalMessages(
+							ctx.user.id,
+							conversation.id,
 						),
-					)
-				).flatMap(rebuildSearchProjection);
-				const conversationIds = new Set(
-					searchProjection(entries, input.query).map((entry) => entry.conversationId),
-				);
-				return conversations
-					.filter((conversation) =>
-						conversation.title.toLocaleLowerCase().includes(input.query.toLocaleLowerCase()) ||
-						conversationIds.has(conversation.id),
-					)
-					.map(({ id, title, updatedAt }) => ({ id, title, updatedAt }));
-			}
-			const like = `%${input.query.replace(/[%_]/g, "\\$&")}%`;
-			const rows = await db
-				.selectFrom("conversation")
-				.leftJoin("message", "message.conversationId", "conversation.id")
-				.select([
-					"conversation.id",
-					"conversation.title",
-					"conversation.updatedAt",
-				])
-				.where("conversation.userId", "=", ctx.user.id)
-				.where((eb) =>
-					eb.or([
-						eb("conversation.title", "like", like),
-						eb("message.text", "like", like),
-					]),
+					),
 				)
-				.groupBy("conversation.id")
-				.orderBy("conversation.updatedAt", "desc")
-				.execute();
-			return rows;
+			).flatMap(rebuildSearchProjection);
+			const conversationIds = new Set(
+				searchProjection(entries, input.query).map(
+					(entry) => entry.conversationId,
+				),
+			);
+			return conversations
+				.filter(
+					(conversation) =>
+						conversation.title
+							.toLocaleLowerCase()
+							.includes(input.query.toLocaleLowerCase()) ||
+						conversationIds.has(conversation.id),
+				)
+				.map(({ id, title, updatedAt }) => ({ id, title, updatedAt }));
 		}),
 
 	messages: protectedProcedure
 		.input(z.object({ conversationId: z.string() }))
 		.query(async ({ ctx, input }) => {
-			if (isChatV2Enabled()) {
-				try {
-					await chatV2Repository.getConversation(ctx.user.id, input.conversationId);
-				} catch {
-					throw new TRPCError({ code: "NOT_FOUND" });
-				}
-				return loadV2Messages(ctx.user.id, input.conversationId);
+			try {
+				await chatV2Repository.getConversation(
+					ctx.user.id,
+					input.conversationId,
+				);
+			} catch {
+				throw new TRPCError({ code: "NOT_FOUND" });
 			}
-			await assertOwnsConversation(ctx.user.id, input.conversationId);
-
-			const messages = await db
-				.selectFrom("message")
-				.select(["id", "role", "text", "status", "parts", "createdAt"])
-				.where("conversationId", "=", input.conversationId)
-				.orderBy("createdAt", "asc")
-				.execute();
-
-			const attachments = messages.length
-				? await db
-						.selectFrom("attachment")
-						.select(["id", "messageId", "filename", "mimeType", "kind"])
-						.where(
-							"messageId",
-							"in",
-							messages.map((m) => m.id),
-						)
-						.execute()
-				: [];
-			const attachmentsByMessage = new Map<string, typeof attachments>();
-			for (const a of attachments) {
-				if (!a.messageId) continue;
-				const list = attachmentsByMessage.get(a.messageId) ?? [];
-				list.push(a);
-				attachmentsByMessage.set(a.messageId, list);
-			}
-
-			const assistantMessageIds = messages
-				.filter((m) => m.role === "assistant")
-				.map((m) => m.id);
-
-			const steps = assistantMessageIds.length
-				? await db
-						.selectFrom("generation_step")
-						.select(["messageId", "data", "sequence"])
-						.where("messageId", "in", assistantMessageIds)
-						.orderBy("sequence", "asc")
-						.execute()
-				: [];
-
-			const stepsByMessage = new Map<string, typeof steps>();
-			for (const step of steps) {
-				const list = stepsByMessage.get(step.messageId) ?? [];
-				list.push(step);
-				stepsByMessage.set(step.messageId, list);
-			}
-
-			return messages.map((m) => {
-				const messageSteps = stepsByMessage.get(m.id);
-				const parts = reconstructPartsFromSteps(m.parts, messageSteps);
-				const reasoning = extractReasoning(parts);
-				const toolCalls = extractToolCalls(parts);
-				const skillInvocation = parseSkillInvocation(parts);
-				return {
-					id: m.id,
-					role: m.role,
-					text: m.text,
-					parts,
-					status: m.status,
-					createdAt: m.createdAt,
-					reasoning,
-					toolCalls,
-					skillInvocation: skillInvocation
-						? { name: skillInvocation.name }
-						: null,
-					attachments: (attachmentsByMessage.get(m.id) ?? []).map((a) => ({
-						id: a.id,
-						filename: a.filename,
-						mimeType: a.mimeType,
-						kind: a.kind,
-					})),
-					isActive:
-						m.status === "generating" && generationManager.isActive(m.id),
-				};
-			});
+			return loadMessages(ctx.user.id, input.conversationId);
 		}),
 
 	getDisplayMode: protectedProcedure
 		.input(z.object({ conversationId: z.string() }))
 		.query(async ({ ctx, input }) => {
-			await assertOwnsConversation(ctx.user.id, input.conversationId);
-			const convo = await db
-				.selectFrom("conversation")
-				.select("displayMode")
-				.where("id", "=", input.conversationId)
-				.executeTakeFirst();
 			const defaultDisplayMode = await getUserDefaultDisplayMode(ctx.user.id);
+			const rawDisplayMode = await (async () => {
+				try {
+					return (
+						await chatV2Repository.getConversation(
+							ctx.user.id,
+							input.conversationId,
+						)
+					).displayMode;
+				} catch {
+					throw new TRPCError({ code: "NOT_FOUND" });
+				}
+			})();
 			const mode =
-				convo?.displayMode === "timeline" || convo?.displayMode === "compact"
-					? convo.displayMode
+				rawDisplayMode === "timeline" || rawDisplayMode === "compact"
+					? rawDisplayMode
 					: defaultDisplayMode;
 			return {
 				displayMode: mode as "compact" | "timeline",
@@ -846,12 +586,15 @@ const conversationRouter = router({
 			}),
 		)
 		.mutation(async ({ ctx, input }) => {
-			await assertOwnsConversation(ctx.user.id, input.conversationId);
-			await db
-				.updateTable("conversation")
-				.set({ displayMode: input.displayMode })
-				.where("id", "=", input.conversationId)
-				.execute();
+			try {
+				await chatV2Repository.setConversationDisplayMode(
+					ctx.user.id,
+					input.conversationId,
+					input.displayMode,
+				);
+			} catch {
+				throw new TRPCError({ code: "NOT_FOUND" });
+			}
 		}),
 
 	setUserDefaultDisplayMode: protectedProcedure
@@ -1080,79 +823,6 @@ const allowlistEntrySchema = z
 		}
 	});
 
-const folderHistorySchema = z.object({
-	id: z.string(),
-	userId: z.string(),
-	name: z.string(),
-	createdAt: z.string(),
-});
-
-const tagHistorySchema = folderHistorySchema;
-
-const conversationHistorySchema = z.object({
-	id: z.string(),
-	userId: z.string(),
-	title: z.string(),
-	folderId: z.string().nullable(),
-	provider: z.string().nullable(),
-	endpointId: z.string().nullable().optional().default(null),
-	modelId: z.string().nullable(),
-	modelApi: z.string().nullable(),
-	systemPrompt: z.string().nullable(),
-	presetReasoningEffort: z.string().nullable(),
-	reasoningEffort: z.string().nullable(),
-	reasoningSummary: z.number(),
-	verbosity: z.string().nullable(),
-	presetVerbosity: z.string().nullable(),
-	autoExecuteTools: z.number(),
-	createdAt: z.string(),
-	updatedAt: z.string(),
-});
-
-const messageHistorySchema = z.object({
-	id: z.string(),
-	conversationId: z.string(),
-	role: z.enum(["user", "assistant"]),
-	text: z.string(),
-	parts: z.string().nullable(),
-	status: z.enum(["complete", "generating", "error"]),
-	model: z.string().nullable(),
-	inputTokens: z.number().nullable(),
-	outputTokens: z.number().nullable(),
-	createdAt: z.string(),
-});
-
-const attachmentHistorySchema = z.object({
-	id: z.string(),
-	userId: z.string(),
-	messageId: z.string(),
-	filename: z.string(),
-	mimeType: z.string(),
-	kind: z.enum(["image", "text"]),
-	byteSize: z.number(),
-	storageKey: z.string(),
-	createdAt: z.string(),
-});
-
-const historySchema = z.object({
-	format: z.literal("solar-chat-history"),
-	version: z.literal(1),
-	exportedAt: z.string(),
-	userId: z.string(),
-	folders: z.array(folderHistorySchema),
-	tags: z.array(tagHistorySchema),
-	conversations: z.array(conversationHistorySchema),
-	messages: z.array(messageHistorySchema),
-	attachments: z.array(attachmentHistorySchema),
-	conversationTags: z.array(
-		z.object({ conversationId: z.string(), tagId: z.string() }),
-	),
-});
-
-function hasDuplicateIds(rows: { id: string }[]) {
-	return new Set(rows.map((row) => row.id)).size !== rows.length;
-}
-
 const adminRouter = router({
 	logLevel: adminProcedure.query(() => ({ level: getLogLevel() })),
 	pasteSettings: adminProcedure.query(() => getPasteSettings()),
@@ -1195,141 +865,45 @@ const adminRouter = router({
 		chatIds: adminProcedure
 			.input(z.object({ userId: z.string() }))
 			.query(async ({ input }) => {
-				const chats = await db
-					.selectFrom("conversation")
-					.select("id")
-					.where("userId", "=", input.userId)
-					.orderBy("updatedAt", "desc")
-					.execute();
+				const chats = await chatV2Repository.listConversations(input.userId);
 				return chats.map((chat) => chat.id);
 			}),
 
 		chatRows: adminProcedure
-			.input(z.object({ chatId: z.string() }))
+			.input(z.object({ chatId: z.string(), userId: z.string() }))
 			.query(async ({ input }) => {
-				const conversation = await db
-					.selectFrom("conversation")
-					.selectAll()
-					.where("id", "=", input.chatId)
-					.executeTakeFirst();
-				if (!conversation) throw new TRPCError({ code: "NOT_FOUND" });
-
-				const messages = await db
-					.selectFrom("message")
-					.selectAll()
-					.where("conversationId", "=", input.chatId)
-					.orderBy("createdAt", "asc")
-					.execute();
-				const messageIds = messages.map((message) => message.id);
-				const [attachments, conversationTags, conversationMcpServers] =
-					await Promise.all([
-						messageIds.length
-							? db
-									.selectFrom("attachment")
-									.selectAll()
-									.where("messageId", "in", messageIds)
-									.execute()
-							: [],
-						db
-							.selectFrom("conversation_tag")
-							.selectAll()
-							.where("conversationId", "=", input.chatId)
-							.execute(),
-						db
-							.selectFrom("conversation_mcp_server")
-							.selectAll()
-							.where("conversationId", "=", input.chatId)
-							.execute(),
-					]);
-
-				return {
-					conversation,
-					messages,
-					attachments,
-					conversationTags,
-					conversationMcpServers,
-				};
+				try {
+					return new ChatV2ExportService(db, chatV2Repository).build(
+						input.userId,
+						input.chatId,
+					);
+				} catch {
+					throw new TRPCError({ code: "NOT_FOUND" });
+				}
 			}),
 	}),
 
 	history: router({
 		export: adminProcedure
-			.input(z.object({ userId: z.string(), conversationId: z.string().optional() }))
+			.input(
+				z.object({ userId: z.string(), conversationId: z.string().optional() }),
+			)
 			.query(async ({ input }) => {
-				if (isChatV2Enabled()) {
-					if (!input.conversationId)
-						throw new TRPCError({
-							code: "BAD_REQUEST",
-							message: "conversationId required for chat-v2 export",
-						});
-					return new ChatV2ExportService(db, chatV2Repository).build(
-						input.userId,
-						input.conversationId,
-					);
-				}
-				const [folders, tags, conversations] = await Promise.all([
-					db
-						.selectFrom("folder")
-						.selectAll()
-						.where("userId", "=", input.userId)
-						.execute(),
-					db
-						.selectFrom("tag")
-						.selectAll()
-						.where("userId", "=", input.userId)
-						.execute(),
-					db
-						.selectFrom("conversation")
-						.selectAll()
-						.where("userId", "=", input.userId)
-						.orderBy("createdAt", "asc")
-						.execute(),
-				]);
-				const conversationIds = conversations.map(
-					(conversation) => conversation.id,
+				const service = new ChatV2ExportService(db, chatV2Repository);
+				if (input.conversationId)
+					return service.build(input.userId, input.conversationId);
+				const conversations = await chatV2Repository.listConversations(
+					input.userId,
 				);
-				const messages = conversationIds.length
-					? await db
-							.selectFrom("message")
-							.selectAll()
-							.where("conversationId", "in", conversationIds)
-							.orderBy("createdAt", "asc")
-							.execute()
-					: [];
-				const messageIds = messages.map((message) => message.id);
-				const [attachments, conversationTags] = await Promise.all([
-					messageIds.length
-						? db
-								.selectFrom("attachment")
-								.selectAll()
-								.where("messageId", "in", messageIds)
-								.execute()
-						: [],
-					conversationIds.length
-						? db
-								.selectFrom("conversation_tag")
-								.selectAll()
-								.where("conversationId", "in", conversationIds)
-								.execute()
-						: [],
-				]);
-
 				return {
-					format: "solar-chat-history" as const,
-					version: 1 as const,
+					format: "solar-chat-v2-history-bundle" as const,
 					exportedAt: new Date().toISOString(),
 					userId: input.userId,
-					folders,
-					tags,
-					conversations,
-					messages,
-					attachments: attachments.filter(
-						(
-							attachment,
-						): attachment is typeof attachment & { messageId: string } =>
-							attachment.messageId !== null,
+					conversations: await Promise.all(
+						conversations.map((conversation) =>
+							service.build(input.userId, conversation.id),
+						),
 					),
-					conversationTags,
 				};
 			}),
 
@@ -1342,223 +916,33 @@ const adminRouter = router({
 				}),
 			)
 			.mutation(async ({ input }) => {
-				if (isChatV2Enabled()) {
-					try {
-						const importer = new ChatV2ImportService(db);
-						const plan = await importer.plan(
-							input.history as ChatV2ExportBundle,
-							input.userId,
-							{ remap: input.remap },
-						);
+				const importer = new ChatV2ImportService(db);
+				try {
+					const history = input.history as {
+						format?: string;
+						conversations?: ChatV2ExportBundle[];
+					} & ChatV2ExportBundle;
+					const bundles =
+						history.format === "solar-chat-v2-history-bundle"
+							? (history.conversations ?? [])
+							: [history];
+					const results = [];
+					for (const bundle of bundles) {
+						const plan = await importer.plan(bundle, input.userId, {
+							remap: input.remap,
+						});
 						const result = await importer.execute(plan);
-						return { ...result, ...plan.willCreate };
-					} catch (error) {
-						if (error instanceof ChatV2ImportValidationError)
-							throw new TRPCError({ code: "BAD_REQUEST", message: error.message });
-						throw error;
+						results.push({ ...result, ...plan.willCreate });
 					}
-				}
-				const history = historySchema.parse(input.history);
-				const { userId } = input;
-				if (
-					hasDuplicateIds(history.folders) ||
-					hasDuplicateIds(history.tags) ||
-					hasDuplicateIds(history.conversations) ||
-					hasDuplicateIds(history.messages) ||
-					hasDuplicateIds(history.attachments)
-				) {
-					throw new TRPCError({
-						code: "BAD_REQUEST",
-						message: "History contains duplicate IDs",
-					});
-				}
-
-				const folderIds = new Set(history.folders.map((folder) => folder.id));
-				const tagIds = new Set(history.tags.map((tag) => tag.id));
-				const conversationIds = new Set(
-					history.conversations.map((conversation) => conversation.id),
-				);
-				const messageIds = new Set(
-					history.messages.map((message) => message.id),
-				);
-				if (
-					history.conversations.some(
-						(conversation) =>
-							conversation.folderId !== null &&
-							!folderIds.has(conversation.folderId),
-					) ||
-					history.messages.some(
-						(message) => !conversationIds.has(message.conversationId),
-					) ||
-					history.attachments.some(
-						(attachment) => !messageIds.has(attachment.messageId),
-					) ||
-					history.conversationTags.some(
-						({ conversationId, tagId }) =>
-							!conversationIds.has(conversationId) || !tagIds.has(tagId),
-					)
-				) {
-					throw new TRPCError({
-						code: "BAD_REQUEST",
-						message: "History contains invalid references",
-					});
-				}
-
-				await db.transaction().execute(async (trx) => {
-					const user = sqlite
-						.query("SELECT id FROM user WHERE id = ?")
-						.get(userId);
-					if (!user) throw new TRPCError({ code: "NOT_FOUND" });
-
-					const [
-						existingFolders,
-						existingTags,
-						existingConversations,
-						existingMessages,
-						existingAttachments,
-					] = await Promise.all([
-						history.folders.length
-							? trx
-									.selectFrom("folder")
-									.select("id")
-									.where(
-										"id",
-										"in",
-										history.folders.map((folder) => folder.id),
-									)
-									.execute()
-							: [],
-						history.tags.length
-							? trx
-									.selectFrom("tag")
-									.select("id")
-									.where(
-										"id",
-										"in",
-										history.tags.map((tag) => tag.id),
-									)
-									.execute()
-							: [],
-						history.conversations.length
-							? trx
-									.selectFrom("conversation")
-									.select("id")
-									.where(
-										"id",
-										"in",
-										history.conversations.map(
-											(conversation) => conversation.id,
-										),
-									)
-									.execute()
-							: [],
-						history.messages.length
-							? trx
-									.selectFrom("message")
-									.select("id")
-									.where(
-										"id",
-										"in",
-										history.messages.map((message) => message.id),
-									)
-									.execute()
-							: [],
-						history.attachments.length
-							? trx
-									.selectFrom("attachment")
-									.select("id")
-									.where(
-										"id",
-										"in",
-										history.attachments.map((attachment) => attachment.id),
-									)
-									.execute()
-							: [],
-					]);
-					if (
-						existingFolders.length ||
-						existingTags.length ||
-						existingConversations.length ||
-						existingMessages.length ||
-						existingAttachments.length
-					) {
+					return bundles.length === 1 ? results[0] : { conversations: results };
+				} catch (error) {
+					if (error instanceof ChatV2ImportValidationError)
 						throw new TRPCError({
-							code: "CONFLICT",
-							message: "History conflicts with existing IDs",
+							code: "BAD_REQUEST",
+							message: error.message,
 						});
-					}
-
-					const existingTagNames = history.tags.length
-						? await trx
-								.selectFrom("tag")
-								.select("name")
-								.where("userId", "=", userId)
-								.where(
-									"name",
-									"in",
-									history.tags.map((tag) => tag.name),
-								)
-								.execute()
-						: [];
-					if (existingTagNames.length) {
-						throw new TRPCError({
-							code: "CONFLICT",
-							message: "History conflicts with existing tag names",
-						});
-					}
-
-					if (history.folders.length) {
-						await trx
-							.insertInto("folder")
-							.values(history.folders.map((folder) => ({ ...folder, userId })))
-							.execute();
-					}
-					if (history.tags.length) {
-						await trx
-							.insertInto("tag")
-							.values(history.tags.map((tag) => ({ ...tag, userId })))
-							.execute();
-					}
-					if (history.conversations.length) {
-						await trx
-							.insertInto("conversation")
-							.values(
-								history.conversations.map((conversation) => ({
-									...conversation,
-									userId,
-								})),
-							)
-							.execute();
-					}
-					if (history.messages.length) {
-						await trx.insertInto("message").values(history.messages).execute();
-					}
-					if (history.attachments.length) {
-						await trx
-							.insertInto("attachment")
-							.values(
-								history.attachments.map((attachment) => ({
-									...attachment,
-									userId,
-								})),
-							)
-							.execute();
-					}
-					if (history.conversationTags.length) {
-						await trx
-							.insertInto("conversation_tag")
-							.values(history.conversationTags)
-							.execute();
-					}
-				});
-
-				return {
-					folders: history.folders.length,
-					tags: history.tags.length,
-					conversations: history.conversations.length,
-					messages: history.messages.length,
-					attachments: history.attachments.length,
-				};
+					throw error;
+				}
 			}),
 	}),
 
@@ -1985,21 +1369,26 @@ const modelRouter = router({
 	forConversation: protectedProcedure
 		.input(z.object({ conversationId: z.string() }))
 		.query(async ({ ctx, input }) => {
-			await assertOwnsConversation(ctx.user.id, input.conversationId);
-			const convo = await db
-				.selectFrom("conversation")
-				.select([
-					"provider",
-					"endpointId",
-					"modelId",
-					"modelApi",
-					"reasoningEffort",
-					"presetReasoningEffort",
-					"verbosity",
-					"presetVerbosity",
-				])
-				.where("id", "=", input.conversationId)
-				.executeTakeFirst();
+			const convo = await (async () => {
+				try {
+					const record = await chatV2Repository.getConversation(
+						ctx.user.id,
+						input.conversationId,
+					);
+					return {
+						provider: record.provider,
+						endpointId: record.endpointId,
+						modelId: record.modelId,
+						modelApi: record.modelApi,
+						reasoningEffort: record.reasoningEffort,
+						presetReasoningEffort: null as string | null,
+						verbosity: record.verbosity,
+						presetVerbosity: null as string | null,
+					};
+				} catch {
+					throw new TRPCError({ code: "NOT_FOUND" });
+				}
+			})();
 			const selection = await resolveSelection(
 				{
 					provider: convo?.provider ?? undefined,
@@ -2476,57 +1865,57 @@ const mcpRouter = router({
 	forConversation: protectedProcedure
 		.input(z.object({ conversationId: z.string() }))
 		.query(async ({ ctx, input }) => {
-			await assertOwnsConversation(ctx.user.id, input.conversationId);
-			const [conversation, servers] = await Promise.all([
-				db
-					.selectFrom("conversation")
-					.select("autoExecuteTools")
-					.where("id", "=", input.conversationId)
-					.executeTakeFirstOrThrow(),
-				db
-					.selectFrom("mcp_server")
-					.leftJoin("user_mcp_server_preference", (join) =>
-						join
-							.onRef(
-								"user_mcp_server_preference.serverId",
-								"=",
-								"mcp_server.id",
-							)
-							.on("user_mcp_server_preference.userId", "=", ctx.user.id),
-					)
-					.leftJoin("conversation_mcp_server", (join) =>
-						join
-							.onRef("conversation_mcp_server.serverId", "=", "mcp_server.id")
-							.on(
-								"conversation_mcp_server.conversationId",
-								"=",
-								input.conversationId,
-							),
-					)
-					.select([
-						"mcp_server.id",
-						"mcp_server.name",
-						"mcp_server.enabled",
-						"user_mcp_server_preference.enabled as preferenceEnabled",
-						"conversation_mcp_server.enabled as conversationEnabled",
-					])
-					.where("mcp_server.enabled", "=", 1)
-					.where((eb) =>
-						eb.or([
-							eb("mcp_server.userId", "is", null),
-							eb("mcp_server.userId", "=", ctx.user.id),
-						]),
-					)
-					.execute(),
-			]);
+			const [conversation, bindings, servers] = await (async () => {
+				try {
+					const conv = await chatV2Repository.getConversation(
+						ctx.user.id,
+						input.conversationId,
+					);
+					const bindingRows = await chatV2Repository.listConversationMcpServers(
+						ctx.user.id,
+						input.conversationId,
+					);
+					const serverRows = await db
+						.selectFrom("mcp_server")
+						.leftJoin("user_mcp_server_preference", (join) =>
+							join
+								.onRef(
+									"user_mcp_server_preference.serverId",
+									"=",
+									"mcp_server.id",
+								)
+								.on("user_mcp_server_preference.userId", "=", ctx.user.id),
+						)
+						.select([
+							"mcp_server.id",
+							"mcp_server.name",
+							"mcp_server.enabled",
+							"user_mcp_server_preference.enabled as preferenceEnabled",
+						])
+						.where("mcp_server.enabled", "=", 1)
+						.where((eb) =>
+							eb.or([
+								eb("mcp_server.userId", "is", null),
+								eb("mcp_server.userId", "=", ctx.user.id),
+							]),
+						)
+						.execute();
+					return [conv, bindingRows, serverRows] as const;
+				} catch {
+					throw new TRPCError({ code: "NOT_FOUND" });
+				}
+			})();
+			const bindingByServer = new Map(
+				bindings.map((binding) => [binding.serverId, binding.enabled]),
+			);
 			return {
 				autoExecuteTools: Boolean(conversation.autoExecuteTools),
 				servers: servers.map((server) => ({
 					id: server.id,
 					name: server.name,
-					enabled: Boolean(
-						server.conversationEnabled ?? server.preferenceEnabled ?? 1,
-					),
+					enabled:
+						bindingByServer.get(server.id) ??
+						Boolean(server.preferenceEnabled ?? 1),
 				})),
 			};
 		}),
@@ -2540,56 +1929,48 @@ const mcpRouter = router({
 			}),
 		)
 		.mutation(async ({ ctx, input }) => {
-			await assertOwnsConversation(ctx.user.id, input.conversationId);
 			const server = await getMcpServer(input.serverId);
 			if (server.userId !== null && server.userId !== ctx.user.id)
 				throw new TRPCError({ code: "FORBIDDEN" });
-			await db
-				.insertInto("conversation_mcp_server")
-				.values({
-					conversationId: input.conversationId,
-					serverId: input.serverId,
-					enabled: input.enabled ? 1 : 0,
-				})
-				.onConflict((oc) =>
-					oc
-						.columns(["conversationId", "serverId"])
-						.doUpdateSet({ enabled: input.enabled ? 1 : 0 }),
-				)
-				.execute();
+			try {
+				await chatV2Repository.setConversationMcpServer(
+					ctx.user.id,
+					input.conversationId,
+					input.serverId,
+					input.enabled,
+				);
+			} catch {
+				throw new TRPCError({ code: "NOT_FOUND" });
+			}
 		}),
 
 	setAutoExecute: protectedProcedure
 		.input(z.object({ conversationId: z.string(), enabled: z.boolean() }))
 		.mutation(async ({ ctx, input }) => {
-			await assertOwnsConversation(ctx.user.id, input.conversationId);
-			await db
-				.updateTable("conversation")
-				.set({ autoExecuteTools: input.enabled ? 1 : 0 })
-				.where("id", "=", input.conversationId)
-				.execute();
+			try {
+				await chatV2Repository.setConversationAutoExecuteTools(
+					ctx.user.id,
+					input.conversationId,
+					input.enabled,
+				);
+			} catch {
+				throw new TRPCError({ code: "NOT_FOUND" });
+			}
 		}),
 });
 
 const folderRouter = router({
 	list: protectedProcedure.query(async ({ ctx }) => {
-		return db
-			.selectFrom("folder")
-			.select(["id", "name", "createdAt"])
-			.where("userId", "=", ctx.user.id)
-			.orderBy("name", "asc")
-			.execute();
+		return chatV2Repository.listFolders(ctx.user.id);
 	}),
 
 	create: protectedProcedure
 		.input(z.object({ name: z.string().trim().min(1).max(100) }))
 		.mutation(async ({ ctx, input }) => {
-			const id = crypto.randomUUID();
-			await db
-				.insertInto("folder")
-				.values({ id, userId: ctx.user.id, name: input.name })
-				.execute();
-			return { id };
+			const folder = await chatV2Repository.createFolder(ctx.user.id, {
+				name: input.name,
+			});
+			return { id: folder.id };
 		}),
 
 	rename: protectedProcedure
@@ -2597,62 +1978,52 @@ const folderRouter = router({
 			z.object({ id: z.string(), name: z.string().trim().min(1).max(100) }),
 		)
 		.mutation(async ({ ctx, input }) => {
-			await db
-				.updateTable("folder")
-				.set({ name: input.name })
-				.where("id", "=", input.id)
-				.where("userId", "=", ctx.user.id)
-				.execute();
+			try {
+				await chatV2Repository.renameFolder(ctx.user.id, input.id, input.name);
+			} catch {
+				throw new TRPCError({ code: "NOT_FOUND" });
+			}
 		}),
 
 	remove: protectedProcedure
 		.input(z.object({ id: z.string() }))
 		.mutation(async ({ ctx, input }) => {
-			await db
-				.deleteFrom("folder")
-				.where("id", "=", input.id)
-				.where("userId", "=", ctx.user.id)
-				.execute();
+			try {
+				await chatV2Repository.deleteFolder(ctx.user.id, input.id);
+			} catch {
+				throw new TRPCError({ code: "NOT_FOUND" });
+			}
 		}),
 });
 
 const tagRouter = router({
 	list: protectedProcedure.query(async ({ ctx }) => {
-		return db
-			.selectFrom("tag")
-			.select(["id", "name", "createdAt"])
-			.where("userId", "=", ctx.user.id)
-			.orderBy("name", "asc")
-			.execute();
+		return chatV2Repository.listTags(ctx.user.id);
 	}),
 
 	create: protectedProcedure
 		.input(z.object({ name: z.string().trim().min(1).max(50) }))
 		.mutation(async ({ ctx, input }) => {
 			// Reuse an existing tag of the same name (unique per user).
-			const existing = await db
-				.selectFrom("tag")
-				.select("id")
-				.where("userId", "=", ctx.user.id)
-				.where("name", "=", input.name)
-				.executeTakeFirst();
+			const existing = await chatV2Repository.findTagByName(
+				ctx.user.id,
+				input.name,
+			);
 			if (existing) return { id: existing.id };
-			const id = crypto.randomUUID();
-			await db
-				.insertInto("tag")
-				.values({ id, userId: ctx.user.id, name: input.name })
-				.execute();
-			return { id };
+			const tag = await chatV2Repository.createTag(ctx.user.id, {
+				name: input.name,
+			});
+			return { id: tag.id };
 		}),
 
 	remove: protectedProcedure
 		.input(z.object({ id: z.string() }))
 		.mutation(async ({ ctx, input }) => {
-			await db
-				.deleteFrom("tag")
-				.where("id", "=", input.id)
-				.where("userId", "=", ctx.user.id)
-				.execute();
+			try {
+				await chatV2Repository.deleteTag(ctx.user.id, input.id);
+			} catch {
+				throw new TRPCError({ code: "NOT_FOUND" });
+			}
 		}),
 });
 
