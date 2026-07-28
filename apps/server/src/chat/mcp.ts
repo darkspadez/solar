@@ -82,6 +82,32 @@ export async function testMcpServer(
 	);
 }
 
+/**
+ * Maps persisted MCP tool names (`mcp_<serverId>_<remoteName>`, see `toolName`
+ * above) back to their display {serverName, remoteName}, without contacting
+ * any MCP server. Used to render tool-call chips for history loaded from the
+ * DB, where the live per-generation `serverName`/`remoteName` metadata (built
+ * while resolving tools for the run) isn't persisted.
+ */
+export async function describeToolNames(
+	names: readonly string[],
+): Promise<Map<string, { serverName: string; remoteName: string }>> {
+	const result = new Map<string, { serverName: string; remoteName: string }>();
+	const mcpNames = names.filter((name) => name.startsWith("mcp_"));
+	if (!mcpNames.length) return result;
+	const servers = await db.selectFrom("mcp_server").select(["id", "name"]).execute();
+	for (const name of mcpNames) {
+		for (const server of servers) {
+			const prefix = toolName(server.id, "");
+			if (name.startsWith(prefix)) {
+				result.set(name, { serverName: server.name, remoteName: name.slice(prefix.length) });
+				break;
+			}
+		}
+	}
+	return result;
+}
+
 export async function resolveMcpTools(
 	userId: string,
 	conversationId: string,

@@ -23,7 +23,7 @@ import {
 	type ModelSelection,
 } from "./catalog";
 import { toolProvider } from "./tools";
-import type { ResolvedTool } from "./mcp";
+import { describeToolNames, type ResolvedTool } from "./mcp";
 import {
 	contextualUserText,
 	listExposedSkills,
@@ -50,7 +50,7 @@ import {
 } from "../chat-v2/compactionScheduler";
 import { CompactionService } from "../chat-v2/compaction";
 import { createV2Summarizer } from "../chat-v2/summarizer";
-import { projectVisibleTurns } from "../chat-v2/projection";
+import { projectVisibleTurns, type VisibleTurn } from "../chat-v2/projection";
 import { zeroUsage } from "../chat-v2/validation";
 import { AttachmentService } from "../chat-v2/attachments";
 import { logger } from "../logger";
@@ -679,6 +679,51 @@ function canonicalUsage(usage: AssistantMessage["usage"] | undefined) {
 	};
 }
 
+interface HistoryToolCall {
+	id: string;
+	name: string;
+	serverName?: string;
+	remoteName?: string;
+	args: string;
+	status: "complete" | "error";
+	output?: string;
+}
+
+/**
+ * Rebuilds tool-call chips for a persisted turn from its canonical messages.
+ * The live generation stream carries `serverName`/`remoteName` in-memory
+ * only (see `adapter.ts`'s `toolDisplayNames`), so history reloaded from the
+ * DB has to reconstruct call/result pairing from the raw `toolCall` and
+ * `toolResult` message content instead.
+ */
+function extractTurnToolCalls(turn: VisibleTurn): HistoryToolCall[] {
+	const resultsByCallId = new Map<string, { text: string; isError: boolean }>();
+	for (const { message } of turn.messages) {
+		if (message.role !== "toolResult") continue;
+		const text = message.content
+			.filter((content): content is TextContent => content.type === "text")
+			.map((content) => content.text)
+			.join("\n");
+		resultsByCallId.set(message.toolCallId, { text, isError: message.isError });
+	}
+	const calls: HistoryToolCall[] = [];
+	for (const { message } of turn.messages) {
+		if (message.role !== "assistant") continue;
+		for (const part of message.content) {
+			if (part.type !== "toolCall") continue;
+			const result = resultsByCallId.get(part.id);
+			calls.push({
+				id: part.id,
+				name: part.name,
+				args: JSON.stringify(part.arguments),
+				status: result?.isError ? "error" : "complete",
+				output: result?.text,
+			});
+		}
+	}
+	return calls;
+}
+
 export async function loadMessages(userId: string, conversationId: string) {
 	const records = await chatV2Repository.listCanonicalMessages(
 		userId,
@@ -697,7 +742,12 @@ export async function loadMessages(userId: string, conversationId: string) {
 			attachment,
 		]);
 	await loadCanonicalHistory(chatV2Repository, userId, conversationId);
-	return projectVisibleTurns(records, attachmentsByMessageId).map((turn) => ({
+	const turns = projectVisibleTurns(records, attachmentsByMessageId);
+	const turnToolCalls = turns.map(extractTurnToolCalls);
+	const displayNames = await describeToolNames([
+		...new Set(turnToolCalls.flat().map((call) => call.name)),
+	]);
+	return turns.map((turn, index) => ({
 		id: turn.id,
 		role: turn.role,
 		text: turn.displayText,
@@ -705,7 +755,10 @@ export async function loadMessages(userId: string, conversationId: string) {
 		status: turn.status === "pending" ? "generating" : turn.status,
 		createdAt: turn.messages[0]!.createdAt,
 		reasoning: turn.reasoning.join("\n"),
-		toolCalls: [],
+		toolCalls: turnToolCalls[index]!.map((call) => ({
+			...call,
+			...displayNames.get(call.name),
+		})),
 		skillInvocation: null,
 		attachments: turn.attachments.map(({ id, filename, mimeType, kind }) => ({
 			id,

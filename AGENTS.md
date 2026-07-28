@@ -84,6 +84,7 @@ and no Vite** — don't add one.
 | `bun run deploy:staging` | Dedicated staging deployment; separate from `solar` and only run when deployment is intended |
 | `bun run typecheck` | `tsc` for server, web, shared, and Playwright tests |
 | `bun run test` | Run server and frontend Bun unit tests (`test:server` / `test:web` for one) |
+| — | Never call `bun test apps/server/src` directly — it skips `test:server`'s `--isolate` flag and produces spurious cross-file failures; see `apps/server/AGENTS.md` § Tests |
 | `bun run test:e2e` | Playwright E2E in Chromium (`test:e2e:all` for all three browsers) |
 
 Run `bun run typecheck` before committing.

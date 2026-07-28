@@ -83,3 +83,30 @@ needs no manual migrate.
   from `text`.
 - pi-ai reads provider API keys from the environment (e.g. `OPENAI_API_KEY`),
   so the server must run with the root `.env` loaded (see root `AGENTS.md`).
+
+## Tests
+
+- **Always run server tests via `bun run test:server`, never a bare
+  `bun test apps/server/src`.** The npm script passes `--isolate`, which runs
+  each test file in its own process. Many files use `mock.module(...)` on
+  shared modules (`../db`, `../logger`, `./generationManager`, `./attachments`,
+  ...); without `--isolate` those mocks leak across unrelated files run in the
+  same process and produce dozens of confusing, order-dependent failures that
+  look like real regressions but disappear when the file is run alone. If you
+  ever see a wall of failures from `bun test`, re-run with `--isolate` (or via
+  `bun run test:server`) before concluding anything is actually broken.
+- **Any test that imports `chat/v2Live.ts` (directly or transitively) must
+  mock `./attachments`.** `attachments.ts` constructs a real
+  `@struktoai/mirage-node` `DiskResource` at module load time, and that
+  package is broken in this environment (`FileType.JSON` is `undefined`),
+  so importing the unmocked module crashes immediately — even for tests that
+  never touch attachment storage. Every existing test that pulls in `v2Live.ts`
+  mocks `./attachments` for this reason (see `v2Live.compaction.test.ts` or
+  `attachments.test.ts`, which mocks `@struktoai/mirage-node` directly);
+  follow the same pattern:
+  ```ts
+  mock.module("./attachments", () => ({
+  	expandAttachmentRows: async () => ({ parts: [], documents: [] }),
+  	deleteAttachmentFilesByStorageKey: async () => {},
+  }));
+  ```
