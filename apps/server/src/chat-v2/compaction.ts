@@ -1,6 +1,7 @@
 import {
 	convertToLlm,
 	createCompactionSummaryMessage,
+	estimateTokens,
 } from "@earendil-works/pi-agent-core";
 import type { Message } from "@earendil-works/pi-ai";
 import { assertSafeCompactionRange, sourceHash } from "./context";
@@ -74,24 +75,30 @@ export class CompactionService {
 				sourceHash(messages.slice(first, last + 1)) !== job.sourceHash
 			)
 				return this.repository.markCompactionJobStale(userId, jobId);
-			const source = messages.slice(first, last + 1);
-			const summary = await summarize({
-				messages: source.map((message) => message.message),
-				tokensBefore: source.length,
-			});
-			const replacementMessages = convertToLlm([
-				createCompactionSummaryMessage(
-					summary,
-					source.length,
-					new Date().toISOString(),
-				),
-			]);
-			return this.repository.materializeCompactionJob(userId, jobId, {
-				replacementMessages,
-				promptVersion: "v1",
-				tokensBefore: source.length,
-				tokensAfter: replacementMessages.length,
-			});
+		const source = messages.slice(first, last + 1);
+		const tokensBefore = source.reduce(
+			// biome-ignore lint/suspicious/noExplicitAny: pi-agent-core's AgentMessage is a superset of pi-ai's Message
+			(total, message) => total + estimateTokens(message.message as any),
+			0,
+		);
+		const summary = await summarize({
+			messages: source.map((message) => message.message),
+			tokensBefore,
+		});
+		const replacementMessages = convertToLlm([
+			createCompactionSummaryMessage(
+				summary,
+				tokensBefore,
+				new Date().toISOString(),
+			),
+		]);
+		const tokensAfter = Math.ceil(summary.length / 4);
+		return this.repository.materializeCompactionJob(userId, jobId, {
+			replacementMessages,
+			promptVersion: "v1",
+			tokensBefore,
+			tokensAfter,
+		});
 		} catch (error) {
 			await this.repository.failCompactionJob(
 				userId,

@@ -64,13 +64,17 @@ describe("chat-v2 compaction scheduler", () => {
 			}]);
 		}
 
+		const tightPolicy = { enabled: true, softTriggerTokens: 0, targetTokens: 0 };
 		const jobId = await enqueueCompactionForCompletedGeneration(
 			repository,
 			USER_ID,
 			CONVERSATION_ID,
+			tightPolicy,
 		);
 		expect(jobId).toBeString();
-		expect(await enqueueCompactionForCompletedGeneration(repository, USER_ID, CONVERSATION_ID)).toBeNull();
+		expect(
+			await enqueueCompactionForCompletedGeneration(repository, USER_ID, CONVERSATION_ID, tightPolicy),
+		).toBeNull();
 
 		const artifact = await new CompactionService(repository).run(
 			USER_ID,
@@ -92,5 +96,98 @@ describe("chat-v2 compaction scheduler", () => {
 		expect(
 			database.sqlite.query("select name from sqlite_master where name = 'conversation'").all(),
 		).toEqual([]);
+	});
+
+	test("does not trigger compaction while under the configured token budget", async () => {
+		const database = await createV2TestDatabase();
+		databases.push(database);
+		database.seedUser(USER_ID);
+		const repository = new ChatV2Repository(database.db);
+		await repository.createConversation(USER_ID, {
+			id: CONVERSATION_ID,
+			title: "Realistic policy",
+		});
+
+		// Small conversation with a realistic model token budget — this used to
+		// trigger compaction after just 4 messages regardless of actual token
+		// usage, which summarized context far too early.
+		const messages: Message[] = [
+			{ role: "user", content: "first question", timestamp: 1 },
+			assistant("first answer"),
+			{ role: "user", content: "second question", timestamp: 2 },
+			assistant("second answer"),
+		];
+		for (const [ordinal, message] of messages.entries()) {
+			const turnId = `turn-${ordinal}`;
+			await repository.createTurn(USER_ID, CONVERSATION_ID, {
+				id: turnId,
+				ordinal,
+				role: message.role === "user" ? "user" : "assistant",
+				origin: "text",
+				status: "complete",
+			});
+			await repository.appendCanonicalMessages(USER_ID, CONVERSATION_ID, [{
+				id: `message-${ordinal}`,
+				turnId,
+				message,
+				origin: "text",
+				status: "complete",
+			}]);
+		}
+
+		const realisticPolicy = {
+			enabled: true,
+			softTriggerTokens: 240_000,
+			targetTokens: 180_000,
+		};
+		expect(
+			await enqueueCompactionForCompletedGeneration(
+				repository,
+				USER_ID,
+				CONVERSATION_ID,
+				realisticPolicy,
+			),
+		).toBeNull();
+	});
+
+	test("never triggers when the policy is disabled", async () => {
+		const database = await createV2TestDatabase();
+		databases.push(database);
+		database.seedUser(USER_ID);
+		const repository = new ChatV2Repository(database.db);
+		await repository.createConversation(USER_ID, {
+			id: CONVERSATION_ID,
+			title: "Disabled policy",
+		});
+		const messages: Message[] = [
+			{ role: "user", content: "first question", timestamp: 1 },
+			assistant("first answer"),
+			{ role: "user", content: "second question", timestamp: 2 },
+			assistant("second answer"),
+		];
+		for (const [ordinal, message] of messages.entries()) {
+			const turnId = `turn-${ordinal}`;
+			await repository.createTurn(USER_ID, CONVERSATION_ID, {
+				id: turnId,
+				ordinal,
+				role: message.role === "user" ? "user" : "assistant",
+				origin: "text",
+				status: "complete",
+			});
+			await repository.appendCanonicalMessages(USER_ID, CONVERSATION_ID, [{
+				id: `message-${ordinal}`,
+				turnId,
+				message,
+				origin: "text",
+				status: "complete",
+			}]);
+		}
+		expect(
+			await enqueueCompactionForCompletedGeneration(repository, USER_ID, CONVERSATION_ID, {
+				enabled: false,
+				softTriggerTokens: 0,
+				targetTokens: 0,
+			}),
+		).toBeNull();
 	});
 });
