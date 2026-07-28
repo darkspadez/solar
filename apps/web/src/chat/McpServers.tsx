@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useSession } from "../auth";
 import { useTRPC } from "../trpc";
 
@@ -14,6 +14,17 @@ export function McpServers({ onClose }: { onClose: () => void }) {
 	const [headerName, setHeaderName] = useState("Authorization");
 	const [headerValue, setHeaderValue] = useState("");
 	const [global, setGlobal] = useState(false);
+	const [validationError, setValidationError] = useState<string | null>(
+		null,
+	);
+	// Some browser extensions (password managers, form fillers) can set an
+	// input's value directly on the DOM without firing the events React's
+	// controlled inputs rely on, desyncing displayed text from component
+	// state. Reading refs at submit time — rather than gating the button on
+	// (potentially stale) state — means Save always works off what's
+	// actually on screen.
+	const nameRef = useRef<HTMLInputElement>(null);
+	const urlRef = useRef<HTMLInputElement>(null);
 	const invalidate = () =>
 		qc.invalidateQueries({ queryKey: trpc.mcp.list.queryKey() });
 	const create = useMutation(
@@ -38,6 +49,33 @@ export function McpServers({ onClose }: { onClose: () => void }) {
 		: {};
 	const serverSaved = create.isSuccess && !name && !url && !headerValue;
 
+	const submit = () => {
+		const submittedName = (nameRef.current?.value ?? name).trim();
+		const submittedUrl = (urlRef.current?.value ?? url).trim();
+		if (!submittedName || !submittedUrl) {
+			setValidationError("Name and URL are required.");
+			return;
+		}
+		setValidationError(null);
+		create.mutate({
+			name: submittedName,
+			url: submittedUrl,
+			headers,
+			enabled: true,
+			global,
+		});
+	};
+
+	const runTest = () => {
+		const testUrl = (urlRef.current?.value ?? url).trim();
+		if (!testUrl) {
+			setValidationError("URL is required to test a connection.");
+			return;
+		}
+		setValidationError(null);
+		test.mutate({ url: testUrl, headers });
+	};
+
 	return (
 		<div className="modal modal-open">
 			<div className="modal-box flex h-[calc(100dvh-2rem)] w-11/12 max-w-5xl flex-col p-0">
@@ -61,10 +99,14 @@ export function McpServers({ onClose }: { onClose: () => void }) {
 									<fieldset className="fieldset gap-2">
 										<legend className="fieldset-legend">Name</legend>
 										<input
+											ref={nameRef}
 											className="input w-full"
 											value={name}
 											onChange={(event) => setName(event.target.value)}
 											placeholder="GitHub"
+											autoComplete="off"
+											data-1p-ignore
+											data-lpignore="true"
 										/>
 									</fieldset>
 									<fieldset className="fieldset gap-2">
@@ -72,10 +114,14 @@ export function McpServers({ onClose }: { onClose: () => void }) {
 											Streamable HTTP URL
 										</legend>
 										<input
+											ref={urlRef}
 											className="input w-full"
 											value={url}
 											onChange={(event) => setUrl(event.target.value)}
 											placeholder="https://example.com/mcp"
+											autoComplete="off"
+											data-1p-ignore
+											data-lpignore="true"
 										/>
 									</fieldset>
 								</div>
@@ -86,6 +132,9 @@ export function McpServers({ onClose }: { onClose: () => void }) {
 											className="input w-full"
 											value={headerName}
 											onChange={(event) => setHeaderName(event.target.value)}
+											autoComplete="off"
+											data-1p-ignore
+											data-lpignore="true"
 										/>
 									</fieldset>
 									<fieldset className="fieldset gap-2">
@@ -96,6 +145,9 @@ export function McpServers({ onClose }: { onClose: () => void }) {
 											value={headerValue}
 											onChange={(event) => setHeaderValue(event.target.value)}
 											placeholder="Optional; saved values stay masked"
+											autoComplete="new-password"
+											data-1p-ignore
+											data-lpignore="true"
 										/>
 									</fieldset>
 								</div>
@@ -116,6 +168,11 @@ export function McpServers({ onClose }: { onClose: () => void }) {
 											Server saved
 										</span>
 									)}
+									{validationError && (
+										<span className="text-sm text-error">
+											{validationError}
+										</span>
+									)}
 									{create.isError && (
 										<span className="text-sm text-error">
 											{create.error.message}
@@ -123,23 +180,15 @@ export function McpServers({ onClose }: { onClose: () => void }) {
 									)}
 									<button
 										className="btn btn-outline"
-										disabled={!url || test.isPending}
-										onClick={() => test.mutate({ url, headers })}
+										disabled={test.isPending}
+										onClick={runTest}
 									>
 										{test.isPending ? "Testing…" : "Test connection"}
 									</button>
 									<button
 										className="btn btn-primary"
-										disabled={!name || !url || create.isPending}
-										onClick={() =>
-											create.mutate({
-												name,
-												url,
-												headers,
-												enabled: true,
-												global,
-											})
-										}
+										disabled={create.isPending}
+										onClick={submit}
 									>
 										{create.isPending
 											? "Saving…"

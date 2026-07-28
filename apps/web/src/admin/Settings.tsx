@@ -742,6 +742,9 @@ function ProviderCard({ initial }: { initial: ProviderForm }) {
 						placeholder={
 							initial.hasApiKey ? "Saved — enter to replace" : "sk-…"
 						}
+						autoComplete="new-password"
+						data-1p-ignore
+						data-lpignore="true"
 					/>
 					<p className="label">One key is shared by every endpoint.</p>
 				</fieldset>
