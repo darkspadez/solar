@@ -11,6 +11,8 @@ function isTruthy(value?: string): boolean {
 	return ["1", "true", "yes", "on"].includes(normalized);
 }
 
+export { isTruthy };
+
 export const config = {
 	port: Number(process.env.PORT ?? 3000),
 	dbPath: process.env.DATABASE_PATH ?? "solar.db",
@@ -28,5 +30,6 @@ export const config = {
 	airgapMode: isTruthy(
 		process.env.SOLAR_AIRGAP_MODE ?? process.env.AIRGAP_MODE,
 	),
+	chatV2: isTruthy(process.env.SOLAR_CHAT_V2),
 	attachmentsDataDir: process.env.SOLAR_ATTACHMENTS_DIR ?? "data/attachments",
 } as const;

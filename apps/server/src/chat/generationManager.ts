@@ -48,6 +48,11 @@ interface Generation {
 	steps: unknown[];
 	providerCalls: ChatProviderCall[];
 	telemetry: TelemetryMetadata;
+	persistExternally?: (result: {
+		parts: unknown;
+		status: MessageStatus;
+		text: string;
+	}) => Promise<void>;
 }
 
 interface PersistedToolCall {
@@ -104,6 +109,7 @@ export class GenerationManager {
 		tools?: ResolvedTool[];
 		titleGeneration?: TitleGeneration;
 		telemetry?: TelemetryMetadata;
+		persistExternally?: Generation["persistExternally"];
 		retryContext?: () => Promise<{
 			context: Context;
 			params: GenerationParams;
@@ -133,6 +139,7 @@ export class GenerationManager {
 			steps: [],
 			providerCalls: [],
 			telemetry: opts.telemetry ?? {},
+			persistExternally: opts.persistExternally,
 		};
 		this.generations.set(opts.messageId, gen);
 		logger
@@ -473,6 +480,14 @@ export class GenerationManager {
 	private async persist(gen: Generation, status: MessageStatus): Promise<void> {
 		const fullParts = buildFullAssistantParts(gen);
 		const persistedParts = withPersistedReasoning(fullParts, gen.reasoning);
+		if (gen.persistExternally) {
+			await gen.persistExternally({
+				parts: persistedParts,
+				status,
+				text: gen.text,
+			});
+			return;
+		}
 		await db
 			.updateTable("message")
 			.set({

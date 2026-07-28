@@ -5,7 +5,10 @@ import {
 	readAttachment,
 	removeOrphanAttachment,
 	saveAttachment,
+	saveAttachmentFile,
 } from "./attachments";
+import { AttachmentService } from "../chat-v2/attachments";
+import { chatV2Repository, isChatV2Enabled } from "./v2Live";
 
 export const attachmentRoutes = new Hono();
 
@@ -28,6 +31,22 @@ attachmentRoutes.post("/", async (c) => {
 
 	try {
 		const bytes = new Uint8Array(await file.arrayBuffer());
+		if (isChatV2Enabled()) {
+			const attachment = await saveAttachmentFile({
+				userId,
+				filename: file.name,
+				mimeType: file.type || "application/octet-stream",
+				bytes,
+			});
+			await new AttachmentService(chatV2Repository).create(userId, attachment);
+			return c.json({
+				id: attachment.id,
+				kind: attachment.kind,
+				mimeType: attachment.mimeType,
+				filename: attachment.filename,
+				byteSize: attachment.byteSize,
+			});
+		}
 		const meta = await saveAttachment({
 			userId,
 			filename: file.name,

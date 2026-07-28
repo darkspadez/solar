@@ -57,6 +57,15 @@ import {
 } from "../chat/pasteSettings";
 import { SourceCategoryResolver } from "../sources/categories";
 import { parseSkill, parseSkillInvocation } from "../chat/skills";
+import {
+	chatV2Repository,
+	createV2Conversation,
+	isChatV2Enabled,
+	loadV2Messages,
+} from "../chat/v2Live";
+import { ChatV2ExportService, type ChatV2ExportBundle } from "../chat-v2/export";
+import { ChatV2ImportService, ChatV2ImportValidationError } from "../chat-v2/import";
+import { rebuildSearchProjection, searchProjection } from "../chat-v2/search";
 
 const t = initTRPC.context<TrpcContext>().create();
 
@@ -165,6 +174,21 @@ function contextModelFamily(provider: string, modelId: string) {
 
 const conversationRouter = router({
 	list: protectedProcedure.query(async ({ ctx }) => {
+		if (isChatV2Enabled()) {
+			const conversations = await chatV2Repository.listConversations(ctx.user.id);
+			return conversations.map((conversation) => ({
+				id: conversation.id,
+				title: conversation.title,
+				folderId: conversation.folderId,
+				provider: conversation.provider,
+				endpointId: conversation.endpointId,
+				modelId: conversation.modelId,
+				modelApi: conversation.modelApi,
+				createdAt: conversation.createdAt,
+				updatedAt: conversation.updatedAt,
+				tags: [],
+			}));
+		}
 		const conversations = await db
 			.selectFrom("conversation")
 			.select([
@@ -301,6 +325,18 @@ const conversationRouter = router({
 				}
 			}
 			const defaultDisplayMode = await getUserDefaultDisplayMode(ctx.user.id);
+			if (isChatV2Enabled()) {
+				const id = await createV2Conversation({
+					userId: ctx.user.id,
+					title: input.title ?? "New conversation",
+					provider: snapshot.provider,
+					endpointId: snapshot.endpointId,
+					modelId: snapshot.modelId,
+					modelApi: snapshot.modelApi,
+					systemPrompt: snapshot.systemPrompt,
+				});
+				return { id };
+			}
 			await db
 				.insertInto("conversation")
 				.values({
@@ -320,6 +356,14 @@ const conversationRouter = router({
 			z.object({ id: z.string(), title: z.string().trim().min(1).max(200) }),
 		)
 		.mutation(async ({ ctx, input }) => {
+			if (isChatV2Enabled()) {
+				try {
+					await chatV2Repository.renameConversation(ctx.user.id, input.id, input.title);
+				} catch {
+					throw new TRPCError({ code: "NOT_FOUND" });
+				}
+				return;
+			}
 			await assertOwnsConversation(ctx.user.id, input.id);
 			await db
 				.updateTable("conversation")
@@ -331,6 +375,14 @@ const conversationRouter = router({
 	remove: protectedProcedure
 		.input(z.object({ id: z.string() }))
 		.mutation(async ({ ctx, input }) => {
+			if (isChatV2Enabled()) {
+				try {
+					await chatV2Repository.deleteConversation(ctx.user.id, input.id);
+				} catch {
+					throw new TRPCError({ code: "NOT_FOUND" });
+				}
+				return;
+			}
 			await assertOwnsConversation(ctx.user.id, input.id);
 			const messages = await db
 				.selectFrom("message")
@@ -636,6 +688,25 @@ const conversationRouter = router({
 	search: protectedProcedure
 		.input(z.object({ query: z.string().trim().min(1) }))
 		.query(async ({ ctx, input }) => {
+			if (isChatV2Enabled()) {
+				const conversations = await chatV2Repository.listConversations(ctx.user.id);
+				const entries = (
+					await Promise.all(
+						conversations.map((conversation) =>
+							chatV2Repository.listCanonicalMessages(ctx.user.id, conversation.id),
+						),
+					)
+				).flatMap(rebuildSearchProjection);
+				const conversationIds = new Set(
+					searchProjection(entries, input.query).map((entry) => entry.conversationId),
+				);
+				return conversations
+					.filter((conversation) =>
+						conversation.title.toLocaleLowerCase().includes(input.query.toLocaleLowerCase()) ||
+						conversationIds.has(conversation.id),
+					)
+					.map(({ id, title, updatedAt }) => ({ id, title, updatedAt }));
+			}
 			const like = `%${input.query.replace(/[%_]/g, "\\$&")}%`;
 			const rows = await db
 				.selectFrom("conversation")
@@ -661,6 +732,14 @@ const conversationRouter = router({
 	messages: protectedProcedure
 		.input(z.object({ conversationId: z.string() }))
 		.query(async ({ ctx, input }) => {
+			if (isChatV2Enabled()) {
+				try {
+					await chatV2Repository.getConversation(ctx.user.id, input.conversationId);
+				} catch {
+					throw new TRPCError({ code: "NOT_FOUND" });
+				}
+				return loadV2Messages(ctx.user.id, input.conversationId);
+			}
 			await assertOwnsConversation(ctx.user.id, input.conversationId);
 
 			const messages = await db
@@ -1175,8 +1254,19 @@ const adminRouter = router({
 
 	history: router({
 		export: adminProcedure
-			.input(z.object({ userId: z.string() }))
+			.input(z.object({ userId: z.string(), conversationId: z.string().optional() }))
 			.query(async ({ input }) => {
+				if (isChatV2Enabled()) {
+					if (!input.conversationId)
+						throw new TRPCError({
+							code: "BAD_REQUEST",
+							message: "conversationId required for chat-v2 export",
+						});
+					return new ChatV2ExportService(db, chatV2Repository).build(
+						input.userId,
+						input.conversationId,
+					);
+				}
 				const [folders, tags, conversations] = await Promise.all([
 					db
 						.selectFrom("folder")
@@ -1244,9 +1334,32 @@ const adminRouter = router({
 			}),
 
 		import: adminProcedure
-			.input(z.object({ userId: z.string(), history: historySchema }))
+			.input(
+				z.object({
+					userId: z.string(),
+					history: z.unknown(),
+					remap: z.boolean().optional(),
+				}),
+			)
 			.mutation(async ({ input }) => {
-				const { history, userId } = input;
+				if (isChatV2Enabled()) {
+					try {
+						const importer = new ChatV2ImportService(db);
+						const plan = await importer.plan(
+							input.history as ChatV2ExportBundle,
+							input.userId,
+							{ remap: input.remap },
+						);
+						const result = await importer.execute(plan);
+						return { ...result, ...plan.willCreate };
+					} catch (error) {
+						if (error instanceof ChatV2ImportValidationError)
+							throw new TRPCError({ code: "BAD_REQUEST", message: error.message });
+						throw error;
+					}
+				}
+				const history = historySchema.parse(input.history);
+				const { userId } = input;
 				if (
 					hasDuplicateIds(history.folders) ||
 					hasDuplicateIds(history.tags) ||

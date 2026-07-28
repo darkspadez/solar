@@ -73,8 +73,8 @@ function dimensions(bytes: Uint8Array): {
 	return { width: null, height: null };
 }
 
-/** Uploads a file to disk and creates an unlinked (`messageId` null) row. */
-export async function saveAttachment(params: {
+/** Validates and writes an attachment, leaving persistence to the caller. */
+export async function saveAttachmentFile(params: {
 	userId: string;
 	filename: string;
 	mimeType: string;
@@ -107,30 +107,57 @@ export async function saveAttachment(params: {
 		recursive: true,
 	});
 	await disk.writeFile(path(storageKey), params.bytes);
-
-	await db
-		.insertInto("attachment")
-		.values({
-			id,
-			userId: params.userId,
-			messageId: null,
-			filename: params.filename,
-			mimeType: params.mimeType,
-			kind,
-			byteSize: params.bytes.byteLength,
-			...imageDimensions,
-			...documentMetadata,
-			storageKey,
-			createdAt: new Date().toISOString(),
-		})
-		.execute();
-
+	const sha256 = Buffer.from(
+		await crypto.subtle.digest("SHA-256", params.bytes as unknown as BufferSource),
+	).toString("hex");
 	return {
 		id,
+		storageKey,
 		kind,
 		mimeType: params.mimeType,
 		filename: params.filename,
 		byteSize: params.bytes.byteLength,
+		sha256,
+		...imageDimensions,
+		pageCount: documentMetadata.pageCount,
+		extractedTextChars: documentMetadata.extractedTextChars,
+		createdAt: new Date().toISOString(),
+	};
+}
+
+/** Uploads a file to disk and creates an unlinked (`messageId` null) row. */
+export async function saveAttachment(params: {
+	userId: string;
+	filename: string;
+	mimeType: string;
+	bytes: Uint8Array;
+}) {
+	const attachment = await saveAttachmentFile(params);
+	await db
+		.insertInto("attachment")
+		.values({
+			id: attachment.id,
+			userId: params.userId,
+			messageId: null,
+			filename: attachment.filename,
+			mimeType: attachment.mimeType,
+			kind: attachment.kind,
+			byteSize: attachment.byteSize,
+			width: attachment.width,
+			height: attachment.height,
+			pageCount: attachment.pageCount,
+			extractedTextChars: attachment.extractedTextChars,
+			storageKey: attachment.storageKey,
+			createdAt: attachment.createdAt,
+		})
+		.execute();
+
+	return {
+		id: attachment.id,
+		kind: attachment.kind,
+		mimeType: attachment.mimeType,
+		filename: attachment.filename,
+		byteSize: attachment.byteSize,
 	};
 }
 

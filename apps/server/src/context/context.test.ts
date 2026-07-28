@@ -67,10 +67,14 @@ describe("context assembly", () => {
 			],
 			{ inputLimit: 100, summary },
 		);
+		// "old" shares a turn group with the pinned first user message, but
+		// with ample budget it must still be retained rather than silently
+		// dropped into compaction material.
 		expect(result.records.map((item) => item.id)).toEqual([
 			"system",
 			"first",
 			"summary",
+			"old",
 			"current",
 		]);
 		expect(result.records.filter((item) => item.id === "summary")).toHaveLength(

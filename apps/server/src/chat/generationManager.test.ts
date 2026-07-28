@@ -178,6 +178,44 @@ describe("GenerationManager SSE lifecycle", () => {
 		);
 	});
 
+	test("delegates persistence without writing the v1 message table", async () => {
+		streamFactory = () =>
+			events(
+				{ type: "text_delta", delta: "v2 response" },
+				{
+					...doneEvent,
+					message: {
+						role: "assistant",
+						content: [{ type: "text", text: "v2 response" }],
+						usage: { input: 3, output: 5 },
+					},
+				},
+			);
+		const persisted: unknown[] = [];
+		const manager = new GenerationManager();
+		manager.start({
+			conversationId: "conversation-1",
+			messageId: "v2-turn",
+			context: {} as never,
+			selection: {
+				provider: "test",
+				endpointId: "test",
+				modelId: "model",
+				api: "test",
+			},
+			params: {} as never,
+			persistExternally: async (result) => {
+				persisted.push(result);
+			},
+		});
+
+		await readEvents(manager.subscribe("v2-turn"));
+		expect(persisted).toEqual([
+			expect.objectContaining({ status: "complete", text: "v2 response" }),
+		]);
+		expect(updates).toEqual([]);
+	});
+
 	test("persists streamed reasoning when the final provider message omits it", async () => {
 		streamFactory = () =>
 			events(

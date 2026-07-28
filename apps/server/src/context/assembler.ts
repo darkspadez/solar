@@ -150,14 +150,12 @@ export function assembleContext(
 		);
 	}
 	for (const group of groups.toReversed()) {
-		if (
-			group === currentGroup ||
-			group.some((record) => pinnedIds.has(record.id))
-		)
-			continue;
-		const tokens = estimateRecordsTokens(group, estimate);
+		if (group === currentGroup) continue;
+		const unpinned = group.filter((record) => !pinnedIds.has(record.id));
+		if (unpinned.length === 0) continue;
+		const tokens = estimateRecordsTokens(unpinned, estimate);
 		if (used + tokens > options.inputLimit) break;
-		group.forEach((record) => selectedIds.add(record.id));
+		unpinned.forEach((record) => selectedIds.add(record.id));
 		used += tokens;
 	}
 	const pinned = normalized.filter(

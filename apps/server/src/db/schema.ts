@@ -9,6 +9,21 @@
  */
 import type { Generated } from "kysely";
 import type { Apikey } from "./types.generated";
+import type {
+	V2AttachmentTable,
+	V2ContextCompactionJobTable,
+	V2ContextCompactionTable,
+	V2ConversationMessageTable,
+	V2ConversationTable,
+	V2ConversationTagTable,
+	V2ConversationTurnTable,
+	V2FolderTable,
+	V2GenerationEventTable,
+	V2GenerationTable,
+	V2MessageAttachmentTable,
+	V2TagTable,
+	V2VoiceTurnTable,
+} from "../chat-v2/db/schema";
 
 export interface AppMetaTable {
 	key: string;
@@ -265,4 +280,17 @@ export interface Database {
 	provider_call_telemetry: ProviderCallTelemetryTable;
 	source_category: SourceCategoryTable;
 	skill: SkillTable;
+	v2_conversation: V2ConversationTable;
+	v2_folder: V2FolderTable;
+	v2_tag: V2TagTable;
+	v2_conversation_tag: V2ConversationTagTable;
+	v2_conversation_turn: V2ConversationTurnTable;
+	v2_conversation_message: V2ConversationMessageTable;
+	v2_attachment: V2AttachmentTable;
+	v2_message_attachment: V2MessageAttachmentTable;
+	v2_generation: V2GenerationTable;
+	v2_generation_event: V2GenerationEventTable;
+	v2_voice_turn: V2VoiceTurnTable;
+	v2_context_compaction: V2ContextCompactionTable;
+	v2_context_compaction_job: V2ContextCompactionJobTable;
 }

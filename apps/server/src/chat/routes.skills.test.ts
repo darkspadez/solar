@@ -63,6 +63,7 @@ mock.module("./attachments", () => ({
 	loadAttachmentSummary: async () => "",
 }));
 mock.module("./catalog", () => ({
+	MOCK: true,
 	documentInputCapabilities: async () => ({
 		nativeMimeTypes: [],
 		extractedTextMimeTypes: [],
@@ -77,6 +78,12 @@ mock.module("./catalog", () => ({
 		api: "mock",
 	}),
 	resolveTaskModelOrFallback: async (selection: unknown) => selection,
+	resolveModel: async () => {
+		throw new Error("resolveModel should not be called when MOCK is true");
+	},
+	streamModel: () => {
+		throw new Error("streamModel should not be called when MOCK is true");
+	},
 }));
 mock.module("./generationManager", () => ({
 	generationManager: { start: async () => {} },

@@ -135,7 +135,7 @@ describe("runtime context planning", () => {
 			},
 		];
 		const assembled = assembleContext(records, {
-			inputLimit: 8,
+			inputLimit: 7,
 			estimateTokens: (text) => text.split(/\s+/).length,
 			summary: {
 				id: "summary",
@@ -150,6 +150,55 @@ describe("runtime context planning", () => {
 			"a2",
 		]);
 		expect(assembled.omittedRecordIds).toEqual(["a1"]);
+	});
+
+	test("retains a turn sharing the pinned first-user group when budget allows it", () => {
+		const records = [
+			{
+				id: "u1",
+				role: "user" as const,
+				content: [{ kind: "text" as const, text: "first" }],
+				status: "complete" as const,
+			},
+			{
+				id: "a1",
+				role: "assistant" as const,
+				content: [{ kind: "text" as const, text: "old reply" }],
+				status: "complete" as const,
+			},
+			{
+				id: "u2",
+				role: "user" as const,
+				content: [{ kind: "text" as const, text: "recent" }],
+				status: "complete" as const,
+			},
+			{
+				id: "a2",
+				role: "assistant" as const,
+				content: [{ kind: "text" as const, text: "recent reply" }],
+				status: "complete" as const,
+			},
+		];
+		const assembled = assembleContext(records, {
+			inputLimit: 8,
+			estimateTokens: (text) => text.split(/\s+/).length,
+			summary: {
+				id: "summary",
+				role: "summary",
+				content: [{ kind: "text", text: "old context" }],
+			},
+		});
+		// "a1" shares a turn group with the pinned first user message, but it
+		// must still be retained (not silently orphaned into compaction
+		// material) once it fits the available budget.
+		expect(assembled.records.map((record) => record.id)).toEqual([
+			"u1",
+			"summary",
+			"a1",
+			"u2",
+			"a2",
+		]);
+		expect(assembled.omittedRecordIds).toEqual([]);
 	});
 
 	test("uses the versioned structured prompt contract", () => {

@@ -39,6 +39,17 @@ import {
 } from "./builtins";
 import { reverseGeocode } from "./location";
 import {
+	isChatV2Enabled,
+	chatV2Repository,
+	ownsV2AssistantTurn,
+	ownsV2Conversation,
+	ownsV2UserTurn,
+	editV2UserMessage,
+	regenerateV2AssistantTurn,
+	sendV2Message,
+	stopV2Generation,
+} from "./v2Live";
+import {
 	contextualUserText,
 	isSkillReadResult,
 	parseSkillInvocation,
@@ -453,6 +464,23 @@ chatRoutes.post("/", async (c) => {
 	}
 	const { conversationId, text, attachmentIds, userLocation, skillName } =
 		input;
+	if (isChatV2Enabled()) {
+		if ((!text.trim() && !attachmentIds?.length) || skillName)
+			return c.json(
+				{ error: "chat-v2 currently supports text messages and attachments only" },
+				400,
+			);
+		if (!(await ownsV2Conversation(user.id, conversationId)))
+			return c.json({ error: "conversation not found" }, 404);
+		const messageId = await sendV2Message({
+			userId: user.id,
+			isAdmin: user.isAdmin,
+			conversationId,
+			text,
+			attachmentIds,
+		});
+		return c.json({ messageId }, 202);
+	}
 	const parsedUserLocation = parseUserLocation(userLocation);
 	const hasAttachments = Boolean(attachmentIds?.length);
 	if (!conversationId || (!text?.trim() && !hasAttachments && !skillName)) {
@@ -564,6 +592,19 @@ chatRoutes.post("/edit", async (c) => {
 	if (!messageId || !text?.trim()) {
 		return c.json({ error: "messageId and text are required" }, 400);
 	}
+	if (isChatV2Enabled()) {
+		if (!(await ownsV2UserTurn(user.id, messageId)))
+			return c.json({ error: "message not found" }, 404);
+		const turn = await chatV2Repository.getTurn(user.id, messageId);
+		const assistantMessageId = await editV2UserMessage({
+			userId: user.id,
+			isAdmin: user.isAdmin,
+			conversationId: turn.conversationId,
+			targetTurnId: messageId,
+			text,
+		});
+		return c.json({ messageId: assistantMessageId }, 202);
+	}
 
 	const msg = await getOwnedMessage(user.id, messageId);
 	if (!msg) return c.json({ error: "message not found" }, 404);
@@ -603,6 +644,18 @@ chatRoutes.post("/regenerate", async (c) => {
 		userLocation?: unknown;
 	};
 	if (!messageId) return c.json({ error: "messageId required" }, 400);
+	if (isChatV2Enabled()) {
+		if (!(await ownsV2AssistantTurn(user.id, messageId)))
+			return c.json({ error: "message not found" }, 404);
+		const turn = await chatV2Repository.getTurn(user.id, messageId);
+		const assistantMessageId = await regenerateV2AssistantTurn({
+			userId: user.id,
+			isAdmin: user.isAdmin,
+			conversationId: turn.conversationId,
+			targetTurnId: messageId,
+		});
+		return c.json({ messageId: assistantMessageId }, 202);
+	}
 
 	const msg = await getOwnedMessage(user.id, messageId);
 	if (!msg) return c.json({ error: "message not found" }, 404);
@@ -632,6 +685,13 @@ chatRoutes.get("/stream", async (c) => {
 
 	const messageId = c.req.query("messageId");
 	if (!messageId) return c.json({ error: "messageId required" }, 400);
+	if (isChatV2Enabled()) {
+		if (!(await ownsV2AssistantTurn(user.id, messageId)))
+			return c.json({ error: "message not found" }, 404);
+		return new Response(generationManager.subscribe(messageId, Number(
+			c.req.header("last-event-id") ?? c.req.query("lastEventId") ?? 0,
+		)), { headers: sseHeaders });
+	}
 	if (!(await getOwnedMessage(user.id, messageId)))
 		return c.json({ error: "message not found" }, 404);
 
@@ -651,6 +711,11 @@ chatRoutes.post("/stop", async (c) => {
 
 	const { messageId } = (await c.req.json()) as { messageId: string };
 	if (!messageId) return c.json({ error: "messageId required" }, 400);
+	if (isChatV2Enabled()) {
+		if (!(await ownsV2AssistantTurn(user.id, messageId)))
+			return c.json({ error: "message not found" }, 404);
+		return c.json({ stopped: await stopV2Generation(user.id, messageId) });
+	}
 	if (!(await getOwnedMessage(user.id, messageId)))
 		return c.json({ error: "message not found" }, 404);
 	const stopped = generationManager.stop(messageId);
@@ -666,6 +731,11 @@ chatRoutes.post("/force-stop", async (c) => {
 
 	const { messageId } = (await c.req.json()) as { messageId: string };
 	if (!messageId) return c.json({ error: "messageId required" }, 400);
+	if (isChatV2Enabled()) {
+		if (!(await ownsV2AssistantTurn(user.id, messageId)))
+			return c.json({ error: "message not found" }, 404);
+		return c.json({ stopped: await stopV2Generation(user.id, messageId) });
+	}
 	const message = await getOwnedMessage(user.id, messageId);
 	if (!message) return c.json({ error: "message not found" }, 404);
 	if (message.role !== "assistant") {
