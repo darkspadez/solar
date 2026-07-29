@@ -336,6 +336,55 @@ describe("chat-v2 database", () => {
 		).rejects.toBeInstanceOf(V2NotFoundError);
 	});
 
+	test("returns the canonical user message ID for attachment bindings", async () => {
+		const { db, repository } = await repositoryFixture();
+		const conversation = await repository.createConversation(USER_A, {
+			id: "attachment-conversation",
+			title: "Attachment conversation",
+		});
+		await repository.createAttachment(USER_A, {
+			id: "attachment-1",
+			storageKey: "attachment-1",
+			filename: "note.txt",
+			mimeType: "text/plain",
+			kind: "text",
+			byteSize: 4,
+			sha256: "hash",
+		});
+
+		const started = await repository.startUserTurn(USER_A, conversation.id, {
+			userTurnId: "user-turn",
+			assistantTurnId: "assistant-turn",
+			userMessage: {
+				message: { role: "user", content: "note", timestamp: 1 },
+				origin: "text",
+				status: "complete",
+			},
+		});
+		await repository.bindAttachment(
+			USER_A,
+			conversation.id,
+			started.userMessageId,
+			"attachment-1",
+			0,
+		);
+
+		expect(started).toEqual({
+			userTurnId: "user-turn",
+			userMessageId: expect.any(String),
+			assistantTurnId: "assistant-turn",
+		});
+		expect(
+			await db.selectFrom("v2_message_attachment").selectAll().execute(),
+		).toEqual([
+			{
+				messageId: started.userMessageId,
+				attachmentId: "attachment-1",
+				ordinal: 0,
+			},
+		]);
+	});
+
 	test("persists per-conversation model, effort, verbosity, display mode, and MCP settings", async () => {
 		const { repository } = await repositoryFixture();
 		const conversation = await repository.createConversation(USER_A, {

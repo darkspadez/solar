@@ -721,7 +721,11 @@ export class ChatV2Repository {
 			assistantTurnId?: string;
 			userMessage: CanonicalMessageInput;
 		},
-	): Promise<{ userTurnId: string; assistantTurnId: string }> {
+	): Promise<{
+		userTurnId: string;
+		userMessageId: string;
+		assistantTurnId: string;
+	}> {
 		return this.db.transaction().execute(async (trx) => {
 			await this.requireConversation(trx, userId, conversationId);
 			const maximum = await trx
@@ -756,13 +760,13 @@ export class ChatV2Repository {
 					},
 				])
 				.execute();
-			await this.appendCanonicalMessagesInTransaction(
+			const [userMessage] = await this.appendCanonicalMessagesInTransaction(
 				trx,
 				userId,
 				conversationId,
 				[{ ...input.userMessage, turnId: userTurnId }],
 			);
-			return { userTurnId, assistantTurnId };
+			return { userTurnId, userMessageId: userMessage!.id, assistantTurnId };
 		});
 	}
 

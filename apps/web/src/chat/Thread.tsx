@@ -1512,8 +1512,7 @@ export function Thread({
 
 	const handlePaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
 		setAttachmentError(null);
-		if (!pasteThresholds.enabled || event.clipboardData.files.length > 0)
-			return;
+		if (!pasteThresholds.enabled) return;
 		const text = event.clipboardData.getData("text/plain");
 		if (!text || !shouldConvertPastedText(text, pasteThresholds)) return;
 

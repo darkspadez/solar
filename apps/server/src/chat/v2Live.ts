@@ -297,22 +297,19 @@ export async function sendMessage(input: SendMessageInput): Promise<string> {
 	for (const attachmentId of input.attachmentIds ?? [])
 		await chatV2Repository.getAttachment(input.userId, attachmentId);
 
-	const { userTurnId, assistantTurnId } = await chatV2Repository.startUserTurn(
-		input.userId,
-		input.conversationId,
-		{
+	const { userTurnId, userMessageId, assistantTurnId } =
+		await chatV2Repository.startUserTurn(input.userId, input.conversationId, {
 			userMessage: {
 				message: userMessage,
 				origin: "text",
 				status: "complete",
 			},
-		},
-	);
+		});
 	for (const [ordinal, attachmentId] of (input.attachmentIds ?? []).entries())
 		await attachments.bind(
 			input.userId,
 			input.conversationId,
-			userTurnId,
+			userMessageId,
 			attachmentId,
 			ordinal,
 		);
@@ -324,9 +321,7 @@ export async function sendMessage(input: SendMessageInput): Promise<string> {
 		assistantTurnId,
 		conversation,
 		userLocation: input.userLocation,
-		titleGeneration: isFirstMessage
-			? { firstMessage: input.text }
-			: undefined,
+		titleGeneration: isFirstMessage ? { firstMessage: input.text } : undefined,
 	});
 	return assistantTurnId;
 }
