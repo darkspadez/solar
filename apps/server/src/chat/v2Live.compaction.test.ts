@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
 import { createV2TestDatabase } from "../chat-v2/db/fixtures";
 import { ChatV2Repository } from "../chat-v2/db/repository";
@@ -7,7 +7,6 @@ import { zeroUsage } from "../chat-v2/validation";
 const USER_ID = "compaction-live-user";
 
 const database = await createV2TestDatabase();
-database.seedUser(USER_ID);
 
 mock.module("../db", () => ({ db: database.db }));
 mock.module("./catalog", () => ({
@@ -53,7 +52,20 @@ mock.module("./attachments", () => ({
 }));
 mock.module("./builtins", () => ({ renderBuiltinPromptInterpolations: (prompt: string | null) => prompt }));
 
-let generationOptions: { persist?: (result: { steps: unknown[]; parts: unknown; status: string; text: string }) => Promise<void> } | undefined;
+let generationOptions:
+	| {
+			persist?: (result: {
+				steps: unknown[];
+				parts: unknown;
+				status: string;
+				text: string;
+			}) => Promise<void>;
+			retryContext?: () => Promise<{
+				context: { messages: unknown[] };
+				params: unknown;
+			}>;
+	  }
+	| undefined;
 mock.module("./generationManager", () => ({
 	generationManager: {
 		start: (opts: typeof generationOptions) => {
@@ -89,7 +101,13 @@ async function waitFor(check: () => Promise<boolean>, timeoutMs = 2000): Promise
 }
 
 describe("chat-v2 live compaction wiring", () => {
+	beforeEach(() => {
+		database.seedUser(USER_ID);
+	});
 	afterEach(async () => {
+		await database.reset();
+	});
+	afterAll(async () => {
 		await database.destroy();
 	});
 
@@ -145,5 +163,56 @@ describe("chat-v2 live compaction wiring", () => {
 		expect(compactions).toHaveLength(1);
 		const jobs = await repository.listCompactionJobs(USER_ID, conversationId);
 		expect(jobs.every((job) => job.status === "complete")).toBe(true);
+	});
+
+	test("retryContext force-compacts and rebuilds a shorter context after an overflow", async () => {
+		const repository = chatV2Repository as ChatV2Repository;
+		const conversationId = "compaction-retry-conversation";
+		await repository.createConversation(USER_ID, { id: conversationId, title: "Retry compaction" });
+
+		const priorMessages: Message[] = [
+			{ role: "user", content: "first question", timestamp: 1 },
+			assistant("first answer"),
+			{ role: "user", content: "second question", timestamp: 2 },
+			assistant("second answer"),
+		];
+		for (const [ordinal, message] of priorMessages.entries()) {
+			const turnId = `retry-prior-turn-${ordinal}`;
+			await repository.createTurn(USER_ID, conversationId, {
+				id: turnId,
+				ordinal,
+				role: message.role === "user" ? "user" : "assistant",
+				origin: "text",
+				status: "complete",
+			});
+			await repository.appendCanonicalMessages(USER_ID, conversationId, [{
+				id: `retry-prior-message-${ordinal}`,
+				turnId,
+				message,
+				origin: "text",
+				status: "complete",
+			}]);
+		}
+
+		await sendMessage({
+			userId: USER_ID,
+			isAdmin: false,
+			conversationId,
+			text: "third question",
+		});
+
+		expect(generationOptions?.retryContext).toBeFunction();
+		expect((await repository.listCompactions(USER_ID, conversationId)).length).toBe(0);
+
+		const rebuilt = await generationOptions!.retryContext!();
+
+		// The overflow retry must not just fail through — it has to have
+		// actually shortened history for the retried request, not merely
+		// re-sent the same oversized context.
+		const compactions = await repository.listCompactions(USER_ID, conversationId);
+		expect(compactions).toHaveLength(1);
+		expect(rebuilt.context.messages.length).toBeLessThan(
+			priorMessages.length + 1,
+		);
 	});
 });

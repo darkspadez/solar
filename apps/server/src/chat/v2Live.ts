@@ -531,6 +531,21 @@ async function startAssistantTurn(input: {
 		params,
 		tools: resolvedTools,
 		titleGeneration: titleTask,
+		// A genuine context-overflow refusal from the provider is real signal,
+		// not something to hide — but we can still recover in place instead of
+		// dying on it: force a compaction pass (ignoring the soft trigger, since
+		// the provider already told us we're over budget) and retry once with
+		// the rebuilt, shorter context.
+		retryContext: async () => {
+			const rebuilt = await forceCompactAndRebuildContext(
+				input.userId,
+				input.conversationId,
+				selection,
+				systemPrompt,
+			);
+			rebuilt.context.tools = resolvedTools.map(({ tool }) => tool);
+			return { context: rebuilt.context, params };
+		},
 		persist: async ({ steps, parts, status, text }) => {
 			if (status === "error") {
 				await generationService.failGeneration(
@@ -609,6 +624,32 @@ async function resolveCompactionPolicy(
 		),
 		targetTokens: DEFAULT_COMPACTION_SETTINGS.keepRecentTokens,
 	};
+}
+
+/** Used only for the post-overflow retry path: compacts unconditionally
+ * (ignoring the soft trigger) since the provider has already told us the
+ * current history is too large, then rebuilds the outbound context from the
+ * now-shorter history. */
+async function forceCompactAndRebuildContext(
+	userId: string,
+	conversationId: string,
+	selection: ModelSelection,
+	systemPrompt: string | null,
+) {
+	const policy = await resolveCompactionPolicy(selection);
+	const jobId = await enqueueCompactionForCompletedGeneration(
+		chatV2Repository,
+		userId,
+		conversationId,
+		{ enabled: true, softTriggerTokens: 0, targetTokens: policy.targetTokens },
+	);
+	if (jobId)
+		await new CompactionService(chatV2Repository).run(
+			userId,
+			jobId,
+			createV2Summarizer(selection),
+		);
+	return buildOutboundContext(userId, conversationId, selection, systemPrompt);
 }
 
 async function enqueueAndRunCompaction(
