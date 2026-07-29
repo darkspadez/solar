@@ -89,6 +89,10 @@ interface Generation {
 	};
 	steps: unknown[];
 	providerCalls: ChatProviderCall[];
+	/** Pending DB writes for provider-call telemetry, recorded as each call
+	 * completes (not batched at the end) so context/cost metrics stay live
+	 * while a turn is still streaming. Awaited before persist() returns. */
+	telemetryWrites: Promise<void>[];
 	telemetry: TelemetryMetadata;
 	persist: (result: {
 		/** Ordered raw pi-ai messages (assistant/toolResult) from the tool loop,
@@ -186,6 +190,7 @@ export class GenerationManager {
 			},
 			steps: [],
 			providerCalls: [],
+			telemetryWrites: [],
 			telemetry: opts.telemetry ?? {},
 			persist: opts.persist,
 		};
@@ -338,6 +343,27 @@ export class GenerationManager {
 								gen.usage.outputTokens += call.outputTokens ?? 0;
 								gen.usage.cacheReadTokens += call.cacheReadTokens ?? 0;
 								gen.usage.cacheWriteTokens += call.cacheWriteTokens ?? 0;
+								// Recorded as soon as this call completes (rather than at
+								// the end of the whole turn) so context/cost metrics update
+								// live while a turn is still streaming, including mid tool
+								// loops with multiple provider calls.
+								gen.telemetryWrites.push(
+									recordProviderCallTelemetry({
+										id: crypto.randomUUID(),
+										conversationId: gen.conversationId,
+										messageId: gen.messageId,
+										purpose: providerCall.purpose,
+										call,
+									}).catch((error) => {
+										logger
+											.withError(error)
+											.withMetadata({
+												conversationId: gen.conversationId,
+												messageId: gen.messageId,
+											})
+											.warn("failed to record provider call telemetry");
+									}),
+								);
 							},
 						},
 					);
@@ -530,18 +556,9 @@ export class GenerationManager {
 			status,
 			text: gen.text,
 		});
-		await Promise.all(
-			gen.providerCalls.map(({ purpose, observation }) => {
-				const { error: _error, ...call } = observation;
-				return recordProviderCallTelemetry({
-					id: crypto.randomUUID(),
-					conversationId: gen.conversationId,
-					messageId: gen.messageId,
-					purpose,
-					call,
-				});
-			}),
-		);
+		// Provider-call telemetry is written incrementally as each call
+		// completes (see onProviderCall above); just wait for it to land.
+		await Promise.all(gen.telemetryWrites);
 	}
 }
 
