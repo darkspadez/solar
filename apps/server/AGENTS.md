@@ -1,109 +1,28 @@
-# Server guidance
+# Server Guidance
 
-See the root `AGENTS.md` for how to start the server, run scripts, and the
-mock-LLM rule.
+See root `AGENTS.md` for dev server commands, scripts, and the `SOLAR_MOCK_LLM=1` requirement.
 
-## Entrypoint & routing
+## Entrypoint & Routing
+- **Explicit `Bun.serve(...)`**: Must call `Bun.serve` explicitly (default export `{ fetch }` exits immediately).
+- **Route Precedence**: Specific API routes (`/trpc/*`, `/api/auth/*`, `/healthz`) must be defined before the `/*` HTML catch-all in `Bun.serve`.
+- **HTML Entrypoint**: Imported as module: `import index from "@solar/web/index.html"`.
 
-- **Server is started with an explicit `Bun.serve(...)` call**, not a
-  `export default { fetch, routes }`. A default-export server object did **not**
-  keep the process alive here — it started and immediately exited. If you
-  refactor the entrypoint, keep the explicit `Bun.serve` call.
-- **Route precedence in `Bun.serve`.** More-specific route patterns are matched
-  before the `"/*"` HTML catch-all, so API routes (`/trpc/*`, `/api/auth/*`,
-  `/healthz`) must be registered as their own routes that delegate to Hono
-  (`(req) => app.fetch(req)`). If you rely on Hono's top-level `fetch` with a
-  `"/*"` HTML route present, the catch-all swallows the API routes.
-- **HTML entrypoint is imported as a module:** the server does
-  `import index from "@solar/web/index.html"` and passes it to `Bun.serve`
-  `routes`. Bun's `*.html` type declaration comes from `@types/bun`, so no
-  `@ts-expect-error` is needed.
+## Development Seed
+Fresh DB automatically seeds `admin@solar.local` / `password` + Dev API key (printed in startup log). Dev only.
 
-## Default dev login
+## Database & Migrations
+- **Auto-migrate on boot**: Kysely (`bun run migrate`) and Better Auth (`bun run migrate:auth` via `better-auth/db/migration`) run automatically on startup against `solar.db`.
+- **Shared Dialect**: Single `bun:sqlite` instance passed to Kysely and Better Auth.
+- **Codegen**: Run `bun run codegen` (`kysely-codegen --dialect sqlite`). Requires dev-dep `better-sqlite3`. Commit updated `types.generated.ts`.
+- **Timestamps**: SQLite `CURRENT_TIMESTAMP` has second resolution; use explicit ms ISO timestamps for order-sensitive records.
 
-In development (`NODE_ENV !== "production"`) with an empty database, the server
-seeds a convenience account (`src/db/seed-dev.ts`):
-
-| Field | Value |
-| --- | --- |
-| Email | `admin@solar.local` |
-| Password | `password` |
-| API key | Generated once and printed as `seeded dev API key: <key>` |
-
-Because it is the first account created, it becomes the **admin** (first user
-is admin). The API key persists in the development database. The seed never
-runs in production and never runs if any user already exists. Delete
-`apps/server/solar.db*` only when an intentional reset is required.
-
-## Database & migrations
-
-The server auto-runs both migration owners at boot, so a fresh `solar.db`
-needs no manual migrate.
-
-- **Two migration owners, one `solar.db`.** Our Kysely migrations
-  (`bun run migrate`) own app tables; Better Auth owns its own tables
-  (`bun run migrate:auth`, via `getMigrations` from `better-auth/db/migration`
-  — note the subpath, `better-auth/db` does **not** export it). Both run at
-  server boot.
-- **Shared SQLite connection.** `db/index.ts` creates one `bun:sqlite` Database
-  + `BunSqliteDialect`; the *same* dialect is passed to Better Auth
-  (`database: { dialect, type: "sqlite" }`) so auth and app tables can be joined.
-- **`kysely-codegen` needs `better-sqlite3`.** Its SQLite introspector requires
-  `better-sqlite3` even though our runtime uses `bun:sqlite`. It's a
-  **dev-only** dependency, never imported at runtime. Run codegen with
-  `--dialect sqlite` (not `bun-sqlite`/`kysely-bun-sqlite`, which fail to load
-  their introspector). Regenerate against a DB where *both* migration owners
-  have run, or auth tables won't appear in `types.generated.ts`. Migrations +
-  codegen run against `apps/server/solar.db` (the server's cwd).
-- **`solar.db` and its `-wal`/`-shm` sidecars are gitignored.** So is the
-  generated `dist/`. `types.generated.ts` *is* committed.
-- Set a real `BETTER_AUTH_SECRET` (≥32 chars) in `.env`; the dev fallback logs
-  low-entropy warnings.
-- **`defaultTo("CURRENT_TIMESTAMP")` stores the literal string** in Kysely. Use
-  ``defaultTo(sql`CURRENT_TIMESTAMP`)`` for a real SQL default.
-- **SQLite `CURRENT_TIMESTAMP` is second-resolution**, so rows inserted in the
-  same second collide and can't be ordered. For anything order-sensitive
-  (message sequence), write an explicit ms-resolution ISO timestamp from the app
-  at insert time.
-
-## Chat / generation
-
-- **Generation is decoupled from the request** (`chat/generationManager.ts`):
-  the pi stream runs on the generation's *own* `AbortController`, never the HTTP
-  request signal. A client disconnect only detaches an SSE subscriber; the
-  message still completes and persists. Only `POST /api/chat/stop` (explicit
-  Stop) aborts.
-- **Resume** replays buffered chunks after `Last-Event-ID` then attaches live;
-  finished generations stay in memory for `RETENTION_MS` so a reload can still
-  replay. Buffers are in-memory/single-node — they don't survive a restart.
-- **pi context reconstruction:** assistant history items must be full pi
-  `AssistantMessage` objects (role/api/provider/model/usage/stopReason), not
-  `{role, content}`. We persist the *entire* pi assistant message JSON in
-  `message.parts` and replay it verbatim on later turns; user turns are rebuilt
-  from `text`.
-- pi-ai reads provider API keys from the environment (e.g. `OPENAI_API_KEY`),
-  so the server must run with the root `.env` loaded (see root `AGENTS.md`).
+## Chat & Generation
+- **Decoupled execution**: Streaming runs on generation's own `AbortController` (`generationManager.ts`). SSE disconnect does not cancel generation; use `POST /api/chat/stop`.
+- **Context replay**: Full pi `AssistantMessage` JSON (with model/usage/stopReason) is persisted in `message.parts` and replayed verbatim.
 
 ## Tests
-
-- **Always run server tests via `bun run test:server`, never a bare
-  `bun test apps/server/src`.** The npm script passes `--isolate`, which runs
-  each test file in its own process. Many files use `mock.module(...)` on
-  shared modules (`../db`, `../logger`, `./generationManager`, `./attachments`,
-  ...); without `--isolate` those mocks leak across unrelated files run in the
-  same process and produce dozens of confusing, order-dependent failures that
-  look like real regressions but disappear when the file is run alone. If you
-  ever see a wall of failures from `bun test`, re-run with `--isolate` (or via
-  `bun run test:server`) before concluding anything is actually broken.
-- **Any test that imports `chat/v2Live.ts` (directly or transitively) must
-  mock `./attachments`.** `attachments.ts` constructs a real
-  `@struktoai/mirage-node` `DiskResource` at module load time, and that
-  package is broken in this environment (`FileType.JSON` is `undefined`),
-  so importing the unmocked module crashes immediately — even for tests that
-  never touch attachment storage. Every existing test that pulls in `v2Live.ts`
-  mocks `./attachments` for this reason (see `v2Live.compaction.test.ts` or
-  `attachments.test.ts`, which mocks `@struktoai/mirage-node` directly);
-  follow the same pattern:
+- **Isolation required**: ALWAYS run via `bun run test:server` (uses `--isolate`). Bare `bun test` leaks `mock.module` across files.
+- **Attachments mock**: Tests importing `chat/v2Live.ts` must mock `./attachments` to avoid `@struktoai/mirage-node` load failures:
   ```ts
   mock.module("./attachments", () => ({
   	expandAttachmentRows: async () => ({ parts: [], documents: [] }),
