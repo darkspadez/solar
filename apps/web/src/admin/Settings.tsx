@@ -1090,6 +1090,11 @@ function Users() {
 	const remove = useMutation(
 		trpc.admin.deleteUser.mutationOptions({ onSuccess: invalidate }),
 	);
+	const impersonate = useMutation(
+		trpc.admin.startImpersonation.mutationOptions({
+			onSuccess: () => window.location.reload(),
+		}),
+	);
 	const create = useMutation(
 		trpc.admin.createUser.mutationOptions({
 			onSuccess: () => {
@@ -1208,6 +1213,17 @@ function Users() {
 										<option value="admin">Admin</option>
 									</select>
 									<button
+										className="btn btn-primary btn-soft btn-sm"
+										disabled={
+											isCurrentUser ||
+											Boolean(user.isDisabled) ||
+											impersonate.isPending
+										}
+										onClick={() => impersonate.mutate({ userId: user.id })}
+									>
+										{impersonate.isPending ? "Starting…" : "Impersonate"}
+									</button>
+									<button
 										className="btn btn-sm"
 										disabled={isCurrentUser || setDisabled.isPending}
 										onClick={() =>
@@ -1248,6 +1264,11 @@ function Users() {
 						);
 					})}
 				</div>
+				{impersonate.isError && (
+					<div role="alert" className="alert alert-error alert-soft text-sm">
+						{impersonate.error.message}
+					</div>
+				)}
 			</div>
 			{passwordUser && (
 				<div className="modal modal-open">

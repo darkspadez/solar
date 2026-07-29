@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, mock, test } from "bun:test";
 
 let passwordResult = true;
 const passwordChanges: { userId: string; password: string }[] = [];
+const impersonationCalls: string[] = [];
 
 mock.module("../db", () => ({
 	db: {},
@@ -13,6 +14,19 @@ mock.module("../auth", () => ({
 	setSolarUserPassword: async (userId: string, password: string) => {
 		passwordChanges.push({ userId, password });
 		return passwordResult;
+	},
+}));
+mock.module("../impersonation", () => ({
+	startSolarImpersonation: (
+		_sessionId: string,
+		_adminUserId: string,
+		targetUserId: string,
+	) => {
+		impersonationCalls.push(`start:${targetUserId}`);
+		return { name: "Target", email: "target@example.com" };
+	},
+	stopSolarImpersonation: (sessionId: string) => {
+		impersonationCalls.push(`stop:${sessionId}`);
 	},
 }));
 mock.module("../chat/attachments", () => ({
@@ -28,6 +42,7 @@ describe("admin user password changes", () => {
 	beforeEach(() => {
 		passwordResult = true;
 		passwordChanges.length = 0;
+		impersonationCalls.length = 0;
 	});
 
 	test("allows an admin to change their own password", async () => {
@@ -98,5 +113,44 @@ describe("admin user password changes", () => {
 				password: "new-password",
 			}),
 		).rejects.toMatchObject({ code: "NOT_FOUND" });
+	});
+
+	test("allows an admin with a session to impersonate another user", async () => {
+		const caller = appRouter.createCaller({
+			user: { id: "admin", role: "admin" },
+			session: { id: "admin-session", userId: "admin" },
+		} as never);
+
+		await caller.admin.startImpersonation({ userId: "user" });
+		expect(impersonationCalls).toEqual(["start:user"]);
+	});
+
+	test("rejects impersonation without a session or from a non-admin", async () => {
+		const noSession = appRouter.createCaller({
+			user: { id: "admin", role: "admin" },
+			session: null,
+		} as never);
+		await expect(
+			noSession.admin.startImpersonation({ userId: "user" }),
+		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+
+		const user = appRouter.createCaller({
+			user: { id: "user", role: "user" },
+			session: { id: "user-session", userId: "user" },
+		} as never);
+		await expect(
+			user.admin.startImpersonation({ userId: "other" }),
+		).rejects.toMatchObject({ code: "FORBIDDEN" });
+		expect(impersonationCalls).toEqual([]);
+	});
+
+	test("allows an impersonated user to stop impersonating", async () => {
+		const caller = appRouter.createCaller({
+			user: { id: "user", role: "user" },
+			session: { id: "admin-session", userId: "admin" },
+		} as never);
+
+		await caller.admin.stopImpersonation();
+		expect(impersonationCalls).toEqual(["stop:admin-session"]);
 	});
 });

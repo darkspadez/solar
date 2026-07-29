@@ -3,6 +3,7 @@ import { APIError } from "better-auth/api";
 import { apiKey } from "@better-auth/api-key";
 import { config } from "./config";
 import { dialect, sqlite } from "./db";
+import { getSolarImpersonation } from "./impersonation";
 
 export const API_KEY_HEADER = "x-api-key";
 
@@ -126,18 +127,47 @@ export async function getSolarSession(headers: Headers) {
 		return null;
 	}
 	if (!session) return null;
+	let effectiveUserId = session.user.id;
+	let impersonation: {
+		adminUserId: string;
+		targetUserId: string;
+		targetName: string;
+		targetEmail: string;
+	} | null = null;
+	const activeImpersonation = getSolarImpersonation(session.session.id);
+	if (activeImpersonation) {
+		effectiveUserId = activeImpersonation.targetUserId;
+	}
 	const user = sqlite
-		.query("SELECT role, isDisabled FROM user WHERE id = ?")
-		.get(session.user.id) as { role: string; isDisabled: number } | null;
+		.query("SELECT id, name, email, role, isDisabled FROM user WHERE id = ?")
+		.get(effectiveUserId) as {
+		id: string;
+		name: string;
+		email: string;
+		role: string;
+		isDisabled: number;
+	} | null;
 	if (
 		!user ||
 		user.isDisabled ||
 		(headers.has(API_KEY_HEADER) && user.role !== "admin")
 	)
 		return null;
+	if (
+		activeImpersonation &&
+		effectiveUserId === activeImpersonation.targetUserId
+	) {
+		impersonation = {
+			adminUserId: session.user.id,
+			targetUserId: user.id,
+			targetName: user.name,
+			targetEmail: user.email,
+		};
+	}
 	return {
 		session: session.session,
-		user: { ...session.user, role: user.role },
+		user: { ...session.user, ...user, role: user.role },
+		impersonation,
 	};
 }
 

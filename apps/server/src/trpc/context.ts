@@ -7,7 +7,11 @@ import { getSolarSession } from "../auth";
  */
 export async function createContext(_opts: unknown, c: Context) {
 	return (
-		(await getSolarSession(c.req.raw.headers)) ?? { user: null, session: null }
+		(await getSolarSession(c.req.raw.headers)) ?? {
+			user: null,
+			session: null,
+			impersonation: null,
+		}
 	);
 }
 

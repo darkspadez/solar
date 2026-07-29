@@ -1,13 +1,23 @@
-import { devices, expect, test } from "@playwright/test";
+import { devices, expect, test, type Page } from "@playwright/test";
 
 const DEV_EMAIL = "admin@solar.local";
 const DEV_PASSWORD = "password";
 
-async function signIn(page: import("@playwright/test").Page) {
+async function signIn(page: Page) {
 	await page.goto("/");
 	await page.getByPlaceholder("Email").fill(DEV_EMAIL);
 	await page.getByPlaceholder("Password (min 8)").fill(DEV_PASSWORD);
 	await page.getByRole("button", { name: "Sign in" }).click();
+}
+
+async function openSettings(page: Page) {
+	await page.locator(".avatar-placeholder").click();
+	await page.getByRole("button", { name: "Admin settings" }).click();
+}
+
+async function openPresets(page: Page) {
+	await page.getByRole("button", { name: "Presets" }).click();
+	await page.getByRole("button", { name: "Manage presets" }).click();
 }
 
 test("keeps the iOS viewport at its default scale after sign in", async ({
@@ -26,7 +36,7 @@ test("keeps the iOS viewport at its default scale after sign in", async ({
 		"width=device-width, initial-scale=1, maximum-scale=1",
 	);
 	await signIn(page);
-	await expect(page.getByPlaceholder("Message…")).toBeVisible();
+	await expect(page.getByPlaceholder("Send a Message")).toBeVisible();
 
 	const viewport = await page.evaluate(() => ({
 		activeElement: document.activeElement?.tagName,
@@ -105,7 +115,7 @@ test("shows compact provider model rows with per-model settings", async ({
 		});
 		await signIn(page);
 
-		await page.locator('[data-tip="Settings"] button').click();
+		await openSettings(page);
 		await page.getByRole("tab", { name: "Providers" }).click();
 		expect(interceptedProviders).toBe(true);
 
@@ -156,7 +166,7 @@ test("shows compact provider model rows with per-model settings", async ({
 test("deletes a provider from settings", async ({ page }) => {
 	await signIn(page);
 
-	await page.locator('[data-tip="Settings"] button').click();
+	await openSettings(page);
 	await page.getByRole("tab", { name: "Providers" }).click();
 	await page.getByPlaceholder("Provider name").fill("temporary-provider");
 	await page.getByRole("button", { name: "Add provider" }).click();
@@ -183,7 +193,7 @@ test("deletes a provider from settings", async ({ page }) => {
 test("signs in and streams a mock chat response", async ({ page }) => {
 	await signIn(page);
 
-	const composer = page.getByPlaceholder("Message…");
+	const composer = page.getByPlaceholder("Send a Message");
 	await expect(composer).toBeVisible();
 
 	const prompt = "Hello from the browser test";
@@ -202,7 +212,7 @@ test("signs in and streams a mock chat response", async ({ page }) => {
 test("uses the user's default preset for new chats", async ({ page }) => {
 	await signIn(page);
 
-	await page.locator('[data-tip="Presets"] button').click();
+	await openPresets(page);
 	await page.getByRole("button", { name: "New preset" }).click();
 	const presetForm = page.locator(".modal.modal-open .card");
 	await presetForm.getByRole("textbox").first().fill("Vision default");
@@ -219,7 +229,7 @@ test("uses the user's default preset for new chats", async ({ page }) => {
 	await preset.getByRole("button").first().click();
 	await expect(preset.locator("button.text-warning")).toBeVisible();
 	await page.getByRole("button", { name: "Close" }).click();
-	await page.getByRole("button", { name: "New chat" }).click();
+	await page.getByRole("button", { name: "New chat", exact: true }).first().click();
 	await expect(page.getByRole("combobox").first()).toHaveValue(
 		"mock/mock/mock-vision/mock",
 	);
@@ -229,7 +239,7 @@ test("force-stops a stale response from its hover control", async ({
 	page,
 }) => {
 	await signIn(page);
-	const composer = page.getByPlaceholder("Message…");
+	const composer = page.getByPlaceholder("Send a Message");
 	await composer.fill("Stale response test");
 	await page.getByTitle("Send or queue message").click();
 	await expect(page.locator(".solar-assistant-output").last()).toContainText(
@@ -315,7 +325,7 @@ test("queues a follow-up message until the active response completes", async ({
 		await route.continue();
 	});
 
-	const composer = page.getByPlaceholder("Message…");
+	const composer = page.getByPlaceholder("Send a Message");
 	await composer.fill("First queued test message");
 	await page.getByTitle("Send or queue message").click();
 	await expect(page.getByTitle("Interrupt response")).toBeVisible();

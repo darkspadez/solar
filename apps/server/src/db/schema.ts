@@ -261,6 +261,13 @@ export interface SkillTable {
 	updatedAt: Generated<string>;
 }
 
+export interface ImpersonationSessionTable {
+	adminSessionId: string;
+	targetUserId: string;
+	expiresAt: number;
+	updatedAt: number;
+}
+
 export interface Database {
 	apikey: Apikey;
 	app_meta: AppMetaTable;
@@ -281,6 +288,7 @@ export interface Database {
 	provider_call_telemetry: ProviderCallTelemetryTable;
 	source_category: SourceCategoryTable;
 	skill: SkillTable;
+	impersonation_session: ImpersonationSessionTable;
 	v2_conversation: V2ConversationTable;
 	v2_folder: V2FolderTable;
 	v2_tag: V2TagTable;

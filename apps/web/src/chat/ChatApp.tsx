@@ -355,6 +355,34 @@ function UserMenu({
 	);
 }
 
+function ImpersonationBanner({
+	name,
+	email,
+	onStop,
+	isPending,
+}: {
+	name: string;
+	email: string;
+	onStop: () => void;
+	isPending: boolean;
+}) {
+	return (
+		<div className="flex items-center justify-between gap-3 bg-warning px-4 py-2 text-warning-content text-sm">
+			<span className="truncate">
+				Impersonating {name} ({email})
+			</span>
+			<button
+				className="btn btn-sm btn-warning"
+				disabled={isPending}
+				onClick={onStop}
+				type="button"
+			>
+				{isPending ? "Returning…" : "Return to admin"}
+			</button>
+		</div>
+	);
+}
+
 function ConversationView({
 	conversationId,
 	onConfigureMcp,
@@ -398,7 +426,15 @@ export function ChatApp() {
 	const trpc = useTRPC();
 	const qc = useQueryClient();
 	const { data: session } = useSession();
-	const isAdmin = (session?.user as { role?: string })?.role === "admin";
+	const me = useQuery(trpc.me.queryOptions());
+	const effectiveUser = me.data?.user ?? session?.user;
+	const isAdmin = (effectiveUser as { role?: string })?.role === "admin";
+	const impersonation = me.data?.impersonation;
+	const stopImpersonation = useMutation(
+		trpc.admin.stopImpersonation.mutationOptions({
+			onSuccess: () => window.location.reload(),
+		}),
+	);
 	const [activeId, setActiveId] = useState<string | undefined>();
 	// A freshly created conversation is a "draft" until its first turn: it isn't
 	// in the (message-filtered) list yet, but must stay selected.
@@ -623,8 +659,8 @@ export function ChatApp() {
 						{activeId && <DisplayModeToggle conversationId={activeId} />}
 						{activeId && <ConversationInfoMenu conversationId={activeId} />}
 						<UserMenu
-							name={session?.user?.name}
-							email={session?.user?.email}
+							name={effectiveUser?.name}
+							email={effectiveUser?.email}
 							isAdmin={isAdmin}
 							onSettings={() => {
 								setShowSettings(true);
@@ -635,6 +671,14 @@ export function ChatApp() {
 						/>
 					</div>
 				</header>
+				{impersonation && (
+					<ImpersonationBanner
+						name={impersonation.targetName}
+						email={impersonation.targetEmail}
+						onStop={() => stopImpersonation.mutate()}
+						isPending={stopImpersonation.isPending}
+					/>
+				)}
 				<div className="flex min-h-0 flex-1">
 					{activeId ? (
 						<ConversationView

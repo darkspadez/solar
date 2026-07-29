@@ -6,6 +6,10 @@ import {
 	createSolarUser,
 	setSolarUserPassword,
 } from "../auth";
+import {
+	startSolarImpersonation,
+	stopSolarImpersonation,
+} from "../impersonation";
 import { config } from "../config";
 import { db, sqlite } from "../db";
 import { deleteAttachmentFilesForUser } from "../chat/attachments";
@@ -1123,6 +1127,34 @@ const adminRouter = router({
 			}[],
 	),
 
+	startImpersonation: adminProcedure
+		.input(z.object({ userId: z.string() }))
+		.mutation(({ ctx, input }) => {
+			if (!ctx.session) throw new TRPCError({ code: "UNAUTHORIZED" });
+			if (ctx.user.id !== ctx.session.userId)
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Already impersonating",
+				});
+			const target = startSolarImpersonation(
+				ctx.session.id,
+				ctx.user.id,
+				input.userId,
+			);
+			if (!target) throw new TRPCError({ code: "NOT_FOUND" });
+			return { name: target.name, email: target.email };
+		}),
+
+	stopImpersonation: protectedProcedure.mutation(({ ctx }) => {
+		if (!ctx.session || ctx.user.id === ctx.session.userId) {
+			throw new TRPCError({
+				code: "BAD_REQUEST",
+				message: "Not impersonating",
+			});
+		}
+		stopSolarImpersonation(ctx.session.id);
+	}),
+
 	createUser: adminProcedure
 		.input(
 			z.object({
@@ -2045,7 +2077,10 @@ export const appRouter = router({
 		};
 	}),
 
-	me: publicProcedure.query(({ ctx }) => ({ user: ctx.user })),
+	me: publicProcedure.query(({ ctx }) => ({
+		user: ctx.user,
+		impersonation: ctx.impersonation,
+	})),
 
 	/** Which optional auth providers and deployment modes are configured. */
 	authProviders: publicProcedure.query(() => ({
