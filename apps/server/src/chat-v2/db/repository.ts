@@ -707,6 +707,65 @@ export class ChatV2Repository {
 		});
 	}
 
+	/** Atomically opens a user turn + its canonical message + the placeholder
+	 * assistant turn that will hold the reply. Ordinals are derived from the
+	 * current max in a single transaction (not the message count, which is a
+	 * different sequence once a turn spans multiple canonical messages), so a
+	 * failed/aborted attempt never leaves a turn committed at an ordinal that
+	 * blocks every subsequent retry with a UNIQUE constraint violation. */
+	async startUserTurn(
+		userId: string,
+		conversationId: string,
+		input: {
+			userTurnId?: string;
+			assistantTurnId?: string;
+			userMessage: CanonicalMessageInput;
+		},
+	): Promise<{ userTurnId: string; assistantTurnId: string }> {
+		return this.db.transaction().execute(async (trx) => {
+			await this.requireConversation(trx, userId, conversationId);
+			const maximum = await trx
+				.selectFrom("v2_conversation_turn")
+				.select((eb) => eb.fn.max<number>("ordinal").as("ordinal"))
+				.where("conversationId", "=", conversationId)
+				.executeTakeFirst();
+			const firstOrdinal = (maximum?.ordinal ?? -1) + 1;
+			const userTurnId = input.userTurnId ?? id();
+			const assistantTurnId = input.assistantTurnId ?? id();
+			const createdAt = now();
+			await trx
+				.insertInto("v2_conversation_turn")
+				.values([
+					{
+						id: userTurnId,
+						conversationId,
+						ordinal: firstOrdinal,
+						role: "user",
+						origin: input.userMessage.origin,
+						status: "complete",
+						createdAt,
+					},
+					{
+						id: assistantTurnId,
+						conversationId,
+						ordinal: firstOrdinal + 1,
+						role: "assistant",
+						origin: "text",
+						status: "pending",
+						createdAt,
+					},
+				])
+				.execute();
+			await this.appendCanonicalMessagesInTransaction(
+				trx,
+				userId,
+				conversationId,
+				[{ ...input.userMessage, turnId: userTurnId }],
+			);
+			return { userTurnId, assistantTurnId };
+		});
+	}
+
 	async createGeneration(
 		userId: string,
 		conversationId: string,

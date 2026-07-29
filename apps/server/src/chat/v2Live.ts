@@ -279,12 +279,13 @@ export async function sendMessage(input: SendMessageInput): Promise<string> {
 		input.userId,
 		input.conversationId,
 	);
-	const records = await chatV2Repository.listCanonicalMessages(
-		input.userId,
-		input.conversationId,
-	);
-	const userTurnId = crypto.randomUUID();
-	const assistantTurnId = crypto.randomUUID();
+	const isFirstMessage =
+		(
+			await chatV2Repository.listCanonicalMessages(
+				input.userId,
+				input.conversationId,
+			)
+		).length === 0;
 	const timestamp = Date.now();
 	const invocation = await resolveSkill(input.userId, input.skillName);
 	const rawMessage: Message = { role: "user", content: input.text, timestamp };
@@ -296,25 +297,16 @@ export async function sendMessage(input: SendMessageInput): Promise<string> {
 	for (const attachmentId of input.attachmentIds ?? [])
 		await chatV2Repository.getAttachment(input.userId, attachmentId);
 
-	await chatV2Repository.createTurn(input.userId, input.conversationId, {
-		id: userTurnId,
-		ordinal: records.length,
-		role: "user",
-		origin: "text",
-		status: "complete",
-	});
-	await chatV2Repository.appendCanonicalMessages(
+	const { userTurnId, assistantTurnId } = await chatV2Repository.startUserTurn(
 		input.userId,
 		input.conversationId,
-		[
-			{
-				id: userTurnId,
-				turnId: userTurnId,
+		{
+			userMessage: {
 				message: userMessage,
 				origin: "text",
 				status: "complete",
 			},
-		],
+		},
 	);
 	for (const [ordinal, attachmentId] of (input.attachmentIds ?? []).entries())
 		await attachments.bind(
@@ -324,13 +316,6 @@ export async function sendMessage(input: SendMessageInput): Promise<string> {
 			attachmentId,
 			ordinal,
 		);
-	await chatV2Repository.createTurn(input.userId, input.conversationId, {
-		id: assistantTurnId,
-		ordinal: records.length + 1,
-		role: "assistant",
-		origin: "text",
-		status: "pending",
-	});
 
 	await startAssistantTurn({
 		userId: input.userId,
@@ -339,8 +324,9 @@ export async function sendMessage(input: SendMessageInput): Promise<string> {
 		assistantTurnId,
 		conversation,
 		userLocation: input.userLocation,
-		titleGeneration:
-			records.length === 0 ? { firstMessage: input.text } : undefined,
+		titleGeneration: isFirstMessage
+			? { firstMessage: input.text }
+			: undefined,
 	});
 	return assistantTurnId;
 }

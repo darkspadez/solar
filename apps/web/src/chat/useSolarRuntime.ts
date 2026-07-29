@@ -667,18 +667,34 @@ export function useSolarRuntime(
 			});
 			setIsRunning(true);
 			upsertAssistant(displayId, "", undefined, undefined, "connecting");
+			let sent = false;
 			try {
 				const res = await request;
-				if (!res.ok) throw new Error(`Chat request failed (${res.status})`);
+				if (!res.ok) {
+					const body = await res.json().catch(() => null);
+					const detail =
+						body && typeof body === "object" && "error" in body
+							? String((body as { error: unknown }).error)
+							: `HTTP ${res.status}`;
+					throw new Error(detail);
+				}
 				const result = (await res.json()) as { messageId?: string };
 				if (!result.messageId)
 					throw new Error("Chat request returned no message id");
+				sent = true;
 				assistantIdRef.current = result.messageId;
 				await consume(result.messageId, displayId);
 				await loadHistory();
 			} catch (error) {
 				setIsRunning(false);
 				abortRef.current = null;
+				// The request never reached the model (e.g. it failed before a
+				// generation was even created) — say so instead of leaving the
+				// placeholder blank, which reads as "the model returned empty".
+				if (!sent) {
+					const reason = error instanceof Error ? error.message : String(error);
+					upsertAssistant(displayId, `_Failed to send message: ${reason}_`);
+				}
 				throw error;
 			}
 		},
