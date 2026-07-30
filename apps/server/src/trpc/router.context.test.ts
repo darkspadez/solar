@@ -187,6 +187,54 @@ describe("context management metadata", () => {
 		expect(status.summarized).toBe(true);
 		expect(status.summaryEvent).not.toBeNull();
 	});
+	test("successfully manually compacts when messages.length - 3 falls on a tool call", async () => {
+		const conversationId = "tool-compact-conversation";
+		await chatV2Repository.createConversation(USER_ID, { id: conversationId, title: "Tool Chat" });
+		const messages: Message[] = [
+			{ role: "user", content: "first query", timestamp: 1 },
+			assistant("first reply"),
+			{ role: "user", content: "second query", timestamp: 2 },
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", id: "tool-1", name: "search", arguments: {} }],
+				timestamp: 3,
+				provider: "mock",
+				api: "openai-completions",
+				model: "mock",
+				usage: zeroUsage(),
+				stopReason: "toolUse",
+			},
+			{
+				role: "toolResult",
+				toolCallId: "tool-1",
+				toolName: "search",
+				content: [{ type: "text", text: "search output" }],
+				isError: false,
+				timestamp: 4,
+			},
+			assistant("third reply"),
+		];
+		for (const [ordinal, message] of messages.entries()) {
+			const turnId = `turn-${ordinal}`;
+			await chatV2Repository.createTurn(USER_ID, conversationId, {
+				id: turnId,
+				ordinal,
+				role: message.role === "user" ? "user" : "assistant",
+				origin: "text",
+				status: "complete",
+			});
+			await chatV2Repository.appendCanonicalMessages(USER_ID, conversationId, [{
+				id: `message-${ordinal}`,
+				turnId,
+				message,
+				origin: "text",
+				status: "complete",
+			}]);
+		}
+
+		const caller = appRouter.createCaller({ user: { id: USER_ID } } as never);
+		await expect(caller.conversation.compact({ conversationId })).resolves.toEqual({ success: true });
+	});
 
 	test("rejects context status for a conversation the user does not own", async () => {
 		const conversation = await chatV2Repository.createConversation(USER_ID, { title: "Chat" });

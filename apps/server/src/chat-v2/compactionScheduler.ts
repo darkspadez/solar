@@ -1,8 +1,8 @@
 import { estimateTokens } from "@earendil-works/pi-agent-core";
 import type { CanonicalMessageRecord } from "./types";
 import { CompactionService } from "./compaction";
+import { findSafeCompactionRange } from "./context";
 import type { ChatV2Repository } from "./db/repository";
-
 const MIN_COMPACTION_MESSAGES = 2;
 /** Always keep the most recent exchange live regardless of token budget. */
 const RETAIN_LIVE_MESSAGES = 2;
@@ -70,12 +70,21 @@ export async function enqueueCompactionForCompletedGeneration(
 		liveTokens += next;
 		boundary--;
 	}
-	const last = boundary - 1;
-	if (last - first + 1 < MIN_COMPACTION_MESSAGES) return null;
+	const candidateLast = boundary - 1;
+	const safeRange = findSafeCompactionRange(messages, first, candidateLast);
+	if (
+		!safeRange ||
+		safeRange.lastIndex - safeRange.firstIndex + 1 < MIN_COMPACTION_MESSAGES
+	)
+		return null;
 
-	const job = await new CompactionService(repository).enqueue(userId, conversationId, {
-		firstMessageId: messages[first]!.id,
-		lastMessageId: messages[last]!.id,
-	});
+	const job = await new CompactionService(repository).enqueue(
+		userId,
+		conversationId,
+		{
+			firstMessageId: messages[safeRange.firstIndex]!.id,
+			lastMessageId: messages[safeRange.lastIndex]!.id,
+		},
+	);
 	return job.id;
 }

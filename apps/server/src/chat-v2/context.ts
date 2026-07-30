@@ -94,6 +94,62 @@ export function assertSafeCompactionRange(
 			);
 	}
 }
+/**
+ * Given canonical messages, a starting index, and a candidate ending index,
+ * adjusts the range so it never splits an assistant tool call from its result.
+ * Returns null if no valid non-empty range exists within candidate bounds.
+ */
+export function findSafeCompactionRange(
+	messages: readonly CanonicalMessageRecord[],
+	firstIndex: number,
+	candidateLastIndex: number,
+): { firstIndex: number; lastIndex: number } | null {
+	if (
+		firstIndex < 0 ||
+		candidateLastIndex < firstIndex ||
+		candidateLastIndex >= messages.length
+	)
+		return null;
+
+	const callIndexes = new Map<string, number>();
+	const resultIndexes = new Map<string, number>();
+	for (const [index, record] of messages.entries()) {
+		if (record.message.role === "assistant") {
+			for (const part of record.message.content)
+				if (part.type === "toolCall") callIndexes.set(part.id, index);
+		} else if (record.message.role === "toolResult")
+			resultIndexes.set(record.message.toolCallId, index);
+	}
+
+	let last = candidateLastIndex;
+	let first = firstIndex;
+
+	let adjusted = true;
+	while (adjusted) {
+		adjusted = false;
+		for (const [toolCallId, callIndex] of callIndexes) {
+			const resultIndex = resultIndexes.get(toolCallId);
+			if (resultIndex === undefined) continue;
+
+			const includesCall = callIndex >= first && callIndex <= last;
+			const includesResult = resultIndex >= first && resultIndex <= last;
+
+			if (includesCall && !includesResult) {
+				last = callIndex - 1;
+				adjusted = true;
+				break;
+			} else if (!includesCall && includesResult) {
+				first = resultIndex + 1;
+				adjusted = true;
+				break;
+			}
+		}
+	}
+
+	if (last < first) return null;
+
+	return { firstIndex: first, lastIndex: last };
+}
 
 /** Selects current artifacts only; stale source hashes are ignored, ambiguous overlaps fail. */
 export function selectValidCompactions(

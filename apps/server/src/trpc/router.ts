@@ -64,6 +64,9 @@ import {
 	ChatV2ImportValidationError,
 } from "../chat-v2/import";
 import { rebuildSearchProjection, searchProjection } from "../chat-v2/search";
+import { CompactionService } from "../chat-v2/compaction";
+import { findSafeCompactionRange } from "../chat-v2/context";
+import { createV2Summarizer } from "../chat-v2/summarizer";
 
 const t = initTRPC.context<TrpcContext>().create();
 
@@ -354,21 +357,27 @@ const conversationRouter = router({
 				-1,
 			);
 			const first = compactedThrough + 1;
-			const last = messages.length - 3;
-			if (last - first < 1) {
+			const candidateLast = messages.length - 3;
+			const safeRange = findSafeCompactionRange(
+				messages,
+				first,
+				candidateLast,
+			);
+			if (
+				!safeRange ||
+				safeRange.lastIndex - safeRange.firstIndex < 1
+			) {
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "No compactable history available",
 				});
 			}
-			const { CompactionService } = await import("../chat-v2/compaction");
-			const { createV2Summarizer } = await import("../chat-v2/summarizer");
 			const job = await new CompactionService(chatV2Repository).enqueue(
 				ctx.user.id,
 				input.conversationId,
 				{
-					firstMessageId: messages[first]!.id,
-					lastMessageId: messages[last]!.id,
+					firstMessageId: messages[safeRange.firstIndex]!.id,
+					lastMessageId: messages[safeRange.lastIndex]!.id,
 				},
 			);
 			const result = await new CompactionService(chatV2Repository).run(

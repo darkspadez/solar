@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { Message } from "@earendil-works/pi-ai";
 import { CompactionService } from "./compaction";
-import { materializeContext, sourceHash } from "./context";
+import { findSafeCompactionRange, materializeContext, sourceHash } from "./context";
 import {
 	compactionReplacementRange,
 	plainTextExchange,
@@ -106,6 +106,32 @@ describe("chat-v2 context compaction", () => {
 				lastMessageId: "message-1",
 			}),
 		).rejects.toThrow("splits tool call weather-1 from its result");
+	});
+	test("findSafeCompactionRange adjusts candidate range away from split tool transactions", () => {
+		const records = toolCallResultContinuation().map((message, index) => ({
+			id: `message-${index}`,
+			conversationId: CONVERSATION_ID,
+			turnId: `turn-${index}`,
+			ordinal: index,
+			role: message.role === "user" ? ("user" as const) : ("assistant" as const),
+			message,
+			origin: "text" as const,
+			status: "complete" as const,
+			createdAt: new Date().toISOString(),
+		}));
+		// toolCallResultContinuation has:
+		// 0: user
+		// 1: assistant
+		// 2: toolResult (weather-1)
+		// 3: assistant (weather-1 tool call)
+
+		// Candidate ending at 1 (assistant with tool call weather-1) splits weather-1 from its result (at 2)
+		const adjusted = findSafeCompactionRange(records, 0, 1);
+		expect(adjusted).toEqual({ firstIndex: 0, lastIndex: 0 });
+
+		// Candidate ending at 2 includes both tool call (1) and result (2)
+		const safe = findSafeCompactionRange(records, 0, 2);
+		expect(safe).toEqual({ firstIndex: 0, lastIndex: 2 });
 	});
 
 	test("rejects overlapping completed compactions as ambiguous", async () => {
