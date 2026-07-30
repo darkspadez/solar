@@ -186,6 +186,7 @@ describe("context management metadata", () => {
 		expect(status.state).toBe("idle");
 		expect(status.summarized).toBe(true);
 		expect(status.summaryEvent).not.toBeNull();
+		expect(status.summaryEvent?.retainedMessageBoundaryId).toBe("turn-4");
 	});
 	test("successfully manually compacts when messages.length - 3 falls on a tool call", async () => {
 		const conversationId = "tool-compact-conversation";

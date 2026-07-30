@@ -243,6 +243,24 @@ const conversationRouter = router({
 				(job) => job.status === "queued" || job.status === "running",
 			);
 			const latest = compactions.at(-1);
+			let retainedMessageBoundaryId: string | null = null;
+			if (latest) {
+				const canonicalMessages =
+					await chatV2Repository.listCanonicalMessages(
+						ctx.user.id,
+						input.conversationId,
+					);
+				const lastIdx = canonicalMessages.findIndex(
+					(m) => m.id === latest.lastMessageId,
+				);
+				if (lastIdx >= 0) {
+					const lastCompactedTurnId = canonicalMessages[lastIdx]!.turnId;
+					const retainedMsg = canonicalMessages
+						.slice(lastIdx + 1)
+						.find((m) => m.turnId !== lastCompactedTurnId);
+					retainedMessageBoundaryId = retainedMsg ? retainedMsg.turnId : null;
+				}
+			}
 			return {
 				state: failedJob ? "failed" : activeJob ? "running" : "idle",
 				estimatedTokens: latest?.tokensBefore ?? null,
@@ -254,7 +272,7 @@ const conversationRouter = router({
 							tokensAfter: latest.tokensAfter,
 							revision: compactions.length,
 							createdAt: latest.createdAt,
-							retainedMessageBoundaryId: latest.lastMessageId,
+							retainedMessageBoundaryId,
 						}
 					: null,
 			};
