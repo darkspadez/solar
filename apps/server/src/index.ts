@@ -11,6 +11,7 @@ import { migrateToLatest } from "./db/migrate";
 import { seedDevUser } from "./db/seed-dev";
 import { attachmentRoutes } from "./chat/attachmentRoutes";
 import { chatRoutes } from "./chat/routes";
+import { chatV2Repository } from "./chat/v2Live";
 import { createContext } from "./trpc/context";
 import { appRouter } from "./trpc/router";
 
@@ -107,6 +108,7 @@ await db
 	.onConflict((oc) => oc.column("key").doUpdateSet({ value: "1" }))
 	.execute();
 await seedDevUser();
+await chatV2Repository.reconcileRunningGenerations();
 
 const app = new Hono();
 

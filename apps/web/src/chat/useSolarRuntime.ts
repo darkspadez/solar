@@ -694,6 +694,8 @@ export function useSolarRuntime(
 				if (!sent) {
 					const reason = error instanceof Error ? error.message : String(error);
 					upsertAssistant(displayId, `_Failed to send message: ${reason}_`);
+				} else {
+					await loadHistory().catch(() => undefined);
 				}
 				throw error;
 			}

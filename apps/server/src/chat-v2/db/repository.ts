@@ -21,6 +21,7 @@ import {
 	CanonicalMessageValidationError,
 	parseCanonicalMessage,
 	validateMessageSequence,
+	zeroUsage,
 } from "../validation";
 import { assertSafeCompactionRange, sourceHash } from "../context";
 import { logger } from "../../logger";
@@ -1201,10 +1202,9 @@ export class ChatV2Repository {
 			errorMessage,
 		);
 	}
-
-	async reconcileRunningGenerations(userId: string): Promise<number> {
+	async reconcileRunningGenerations(userId?: string): Promise<number> {
 		return this.db.transaction().execute(async (trx) => {
-			const generations = await trx
+			let query = trx
 				.selectFrom("v2_generation as generation")
 				.innerJoin(
 					"v2_conversation as conversation",
@@ -1212,9 +1212,11 @@ export class ChatV2Repository {
 					"generation.conversationId",
 				)
 				.select(["generation.id"])
-				.where("conversation.userId", "=", userId)
-				.where("generation.status", "in", ["running", "streaming"])
-				.execute();
+				.where("generation.status", "in", ["running", "streaming"]);
+			if (userId) {
+				query = query.where("conversation.userId", "=", userId);
+			}
+			const generations = await query.execute();
 			const finishedAt = now();
 			for (const generation of generations) {
 				await trx

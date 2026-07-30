@@ -420,6 +420,40 @@ export async function stopGeneration(
 			generation.id,
 		);
 		if (stopped) generationManager.stop(assistantTurnId);
+
+		const existing = await chatV2Repository.listCanonicalMessages(
+			userId,
+			generation.conversationId,
+		);
+		const hasTurnMessage = existing.some((m) => m.turnId === assistantTurnId);
+		if (!hasTurnMessage) {
+			const partialMessage = generation.partialMessageJson
+				? (JSON.parse(generation.partialMessageJson) as Message)
+				: null;
+			const message: Message = partialMessage ?? {
+				role: "assistant",
+				content: [{ type: "text", text: "_Generation stopped_" }],
+				provider: generation.provider ?? "system",
+				api: generation.api ?? "system",
+				model: generation.model ?? "system",
+				usage: zeroUsage(),
+				stopReason: "stop",
+				timestamp: Date.now(),
+			};
+			await chatV2Repository.appendCanonicalMessages(
+				userId,
+				generation.conversationId,
+				[
+					{
+						id: assistantTurnId,
+						turnId: assistantTurnId,
+						message,
+						origin: "text",
+						status: "complete",
+					},
+				],
+			);
+		}
 		return stopped;
 	} catch {
 		return false;
@@ -542,7 +576,29 @@ async function startAssistantTurn(input: {
 			return { context: rebuilt.context, params };
 		},
 		persist: async ({ steps, parts, status, text }) => {
+			const stepMessages = (steps as Message[]).filter(
+				(step) =>
+					step && (step.role === "assistant" || step.role === "toolResult"),
+			);
+			const finalMessage = canonicalAssistant(parts, selection, text);
+			const orderedMessages = [...stepMessages, finalMessage];
+			const canonicalMessages = orderedMessages.map((message, index) => ({
+				id:
+					index === orderedMessages.length - 1
+						? input.assistantTurnId
+						: crypto.randomUUID(),
+				turnId: input.assistantTurnId,
+				message,
+				origin: "text" as const,
+				status: "complete" as const,
+			}));
+
 			if (status === "error") {
+				await chatV2Repository.appendCanonicalMessages(
+					input.userId,
+					input.conversationId,
+					canonicalMessages,
+				);
 				await generationService.failGeneration(
 					input.userId,
 					generation.id,
@@ -550,25 +606,11 @@ async function startAssistantTurn(input: {
 				);
 				return;
 			}
-			const stepMessages = (steps as Message[]).filter(
-				(step) =>
-					step && (step.role === "assistant" || step.role === "toolResult"),
-			);
-			const finalMessage = canonicalAssistant(parts, selection, text);
-			const orderedMessages = [...stepMessages, finalMessage];
+
 			const completed = await generationService.completeGeneration(
 				input.userId,
 				generation.id,
-				orderedMessages.map((message, index) => ({
-					id:
-						index === orderedMessages.length - 1
-							? input.assistantTurnId
-							: crypto.randomUUID(),
-					turnId: input.assistantTurnId,
-					message,
-					origin: "text" as const,
-					status: "complete" as const,
-				})),
+				canonicalMessages,
 				finalMessage.usage,
 				finalMessage.stopReason,
 			);
