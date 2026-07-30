@@ -567,18 +567,22 @@ function formatTokens(tokens: number | null): string {
 	}).format(tokens);
 }
 
+export function formatReduction(
+	tokensBefore: number | null,
+	tokensAfter: number | null,
+): string | null {
+	if (!tokensBefore || tokensAfter === null || tokensBefore <= 0) return null;
+	if (tokensAfter <= 0) return "100%";
+	const pct = ((tokensBefore - tokensAfter) / tokensBefore) * 100;
+	if (pct <= 0) return "0%";
+	if (pct >= 99.95) return "99.9%";
+	if (pct >= 99) return `${pct.toFixed(1)}%`;
+	return `${Math.round(pct)}%`;
+}
+
 export function SummaryEventCard({ event }: { event: SolarSummaryEvent }) {
 	const tokenStats = `${formatTokens(event.tokensBefore)} → ${formatTokens(event.tokensAfter)} tokens`;
-	const reduction =
-		event.tokensBefore && event.tokensAfter !== null
-			? Math.max(
-					0,
-					Math.round(
-						((event.tokensBefore - event.tokensAfter) / event.tokensBefore) *
-							100,
-					),
-				)
-			: null;
+	const reductionText = formatReduction(event.tokensBefore, event.tokensAfter);
 
 	return (
 		<div className="solar-summary-event">
@@ -593,9 +597,9 @@ export function SummaryEventCard({ event }: { event: SolarSummaryEvent }) {
 							{tokenStats}
 						</div>
 					</div>
-					{reduction !== null && (
+					{reductionText !== null && (
 						<span className="badge badge-sm whitespace-nowrap">
-							{reduction}% smaller
+							{reductionText} smaller
 						</span>
 					)}
 				</div>

@@ -10,6 +10,7 @@ import {
 	groupToolCalls,
 	isFileDrag,
 	shouldConvertPastedText,
+	formatReduction,
 	SummaryEventCard,
 } from "./Thread";
 import type { SolarToolCall } from "./useSolarRuntime";
@@ -124,6 +125,14 @@ describe("SummaryEventCard", () => {
 		expect(screen.getByText("Conversation summarized")).toBeInTheDocument();
 		expect(screen.getByText("12.4K → 3.1K tokens")).toBeInTheDocument();
 		expect(screen.getByText("75% smaller")).toBeInTheDocument();
+	});
+
+	test("formatReduction precision and 100% boundary checks", () => {
+		expect(formatReduction(12_400, 3_100)).toBe("75%");
+		expect(formatReduction(189_373, 881)).toBe("99.5%");
+		expect(formatReduction(100_000, 400)).toBe("99.6%");
+		expect(formatReduction(100, 0)).toBe("100%");
+		expect(formatReduction(100, 100)).toBe("0%");
 	});
 });
 
