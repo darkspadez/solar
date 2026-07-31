@@ -5,6 +5,12 @@ import { ChatV2Repository } from "../chat-v2/db/repository";
 import { zeroUsage } from "../chat-v2/validation";
 
 const USER_ID = "compaction-live-user";
+const nativeDocument = {
+	marker: "[[solar-document:native-document-attachment]]",
+	data: "AAEC",
+	mimeType: "application/pdf",
+	filename: "report.pdf",
+};
 
 const database = await createV2TestDatabase();
 
@@ -47,13 +53,14 @@ mock.module("./catalog", () => ({
 }));
 mock.module("./tools", () => ({ toolProvider: { resolve: async () => [] } }));
 mock.module("./attachments", () => ({
-	expandAttachmentRows: async () => ({ parts: [], documents: [] }),
+	expandAttachmentRows: async () => ({ parts: [], documents: [nativeDocument] }),
 	deleteAttachmentFilesByStorageKey: async () => {},
 }));
 mock.module("./builtins", () => ({ renderBuiltinPromptInterpolations: (prompt: string | null) => prompt }));
 
 let generationOptions:
 	| {
+			params?: { documents?: unknown[] };
 			persist?: (result: {
 				steps: unknown[];
 				parts: unknown;
@@ -214,5 +221,30 @@ describe("chat-v2 live compaction wiring", () => {
 		expect(rebuilt.context.messages.length).toBeLessThan(
 			priorMessages.length + 1,
 		);
+	});
+
+	test("forwards native attachment documents to generation parameters", async () => {
+		const repository = chatV2Repository as ChatV2Repository;
+		const conversationId = "native-document-conversation";
+		await repository.createConversation(USER_ID, { id: conversationId, title: "Native document" });
+		await repository.createAttachment(USER_ID, {
+			id: "native-document-attachment",
+			storageKey: "native-document-attachment",
+			filename: nativeDocument.filename,
+			mimeType: nativeDocument.mimeType,
+			kind: "document",
+			byteSize: 3,
+			sha256: "hash",
+		});
+
+		await sendMessage({
+			userId: USER_ID,
+			isAdmin: false,
+			conversationId,
+			text: "Can you read this?",
+			attachmentIds: ["native-document-attachment"],
+		});
+
+		expect(generationOptions?.params?.documents).toEqual([nativeDocument]);
 	});
 });

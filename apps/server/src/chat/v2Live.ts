@@ -212,6 +212,7 @@ async function buildAttachmentExpansion(
 
 	return {
 		attachmentsByMessageId,
+		documents: expanded.documents,
 		capabilities: { supportsImages: descriptor?.vision ?? false },
 		resolve: (attachment: { id: string }) =>
 			resolvedById.get(attachment.id) ?? null,
@@ -253,7 +254,7 @@ async function buildOutboundContext(
 	const context: Context = systemPrompt
 		? { systemPrompt, messages: messagesWithCatalog }
 		: { messages: messagesWithCatalog };
-	return { context, manifest };
+	return { context, manifest, documents: attachmentExpansion.documents };
 }
 
 export interface SendMessageInput {
@@ -496,7 +497,7 @@ async function startAssistantTurn(input: {
 			input.conversation.systemPrompt,
 			input.userLocation,
 		) ?? null;
-	const { context, manifest } = await buildOutboundContext(
+	const { context, manifest, documents } = await buildOutboundContext(
 		input.userId,
 		input.conversationId,
 		selection,
@@ -524,7 +525,7 @@ async function startAssistantTurn(input: {
 			input.conversation.verbosity ??
 			capabilities.defaultVerbosity ??
 			undefined,
-		documents: [],
+		documents,
 	};
 
 	const titleTask = input.titleGeneration
