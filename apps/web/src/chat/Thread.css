@@ -350,6 +350,18 @@
   color: #111;
 }
 
+.solar-metrics {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-right: 0.25rem;
+  color: color-mix(in oklch, var(--color-base-content) 52%, transparent);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.625rem;
+  line-height: 1;
+  white-space: nowrap;
+}
+
 .solar-tool-calls {
   display: grid;
   gap: 4px;

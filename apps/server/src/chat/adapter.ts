@@ -97,6 +97,15 @@ export function piEventToUiChunks(
 					usage: {
 						inputTokens: event.message.usage.input,
 						outputTokens: event.message.usage.output,
+						...(event.message.usage.reasoning !== undefined && {
+							reasoningTokens: event.message.usage.reasoning,
+						}),
+						...(event.message.usage.cacheRead !== undefined && {
+							cacheReadTokens: event.message.usage.cacheRead,
+						}),
+						...(event.message.usage.cacheWrite !== undefined && {
+							cacheWriteTokens: event.message.usage.cacheWrite,
+						}),
 					},
 				},
 			];

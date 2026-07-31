@@ -44,9 +44,21 @@ interface SolarMessage {
 	summaryEvent?: SolarSummaryEvent;
 	attachments?: SolarAttachmentMeta[];
 	skillInvocation?: { name: string } | null;
+	metrics?: SolarMetrics;
 }
 
 export type SolarConnectionStatus = "connecting" | "request-sent";
+
+export interface SolarMetrics {
+	ttftMs: number | null;
+	tps: number | null;
+	e2e: number | null;
+	inputTokens: number | null;
+	outputTokens: number | null;
+	reasoningTokens: number | null;
+	cacheReadTokens: number | null;
+	cacheWriteTokens: number | null;
+}
 
 export interface SolarSummaryEvent {
 	tokensBefore: number | null;
@@ -318,9 +330,41 @@ function convertMessage(m: SolarMessage): ThreadMessageLike {
 				toolCalls: m.toolCalls,
 				summaryEvent: m.summaryEvent,
 				skillInvocation: m.skillInvocation,
+				metrics: m.metrics,
 			},
 		},
 	};
+}
+
+function parseMessageMetrics(parts: string | null | undefined): SolarMetrics | undefined {
+	if (!parts) return undefined;
+	try {
+		const parsed = JSON.parse(parts) as {
+			usage?: {
+				input?: unknown;
+				output?: unknown;
+				reasoning?: unknown;
+				cacheRead?: unknown;
+				cacheWrite?: unknown;
+			};
+		};
+		const usage = parsed.usage;
+		if (!usage) return undefined;
+		const numberOrNull = (value: unknown) =>
+			typeof value === "number" && Number.isFinite(value) ? value : null;
+		return {
+			ttftMs: null,
+			tps: null,
+			e2e: null,
+			inputTokens: numberOrNull(usage.input),
+			outputTokens: numberOrNull(usage.output),
+			reasoningTokens: numberOrNull(usage.reasoning),
+			cacheReadTokens: numberOrNull(usage.cacheRead),
+			cacheWriteTokens: numberOrNull(usage.cacheWrite),
+		};
+	} catch {
+		return undefined;
+	}
 }
 
 function appendText(message: AppendMessage): string {
@@ -360,6 +404,7 @@ export function useSolarRuntime(
 	const loadedSummaryRevisionRef = useRef<number | null | undefined>(undefined);
 	const loadHistoryRef = useRef<() => Promise<void>>(() => Promise.resolve());
 	const toolCallsByMessageRef = useRef(new Map<string, SolarToolCall[]>());
+	const metricsByMessageRef = useRef(new Map<string, SolarMetrics>());
 	const runQueuedTurnRef = useRef<(message: AppendMessage) => void>(
 		() => undefined,
 	);
@@ -398,6 +443,7 @@ export function useSolarRuntime(
 			reasoning?: string,
 			toolCalls?: SolarToolCall[],
 			connectionStatus?: SolarConnectionStatus,
+			metrics?: SolarMetrics,
 		) => {
 			setMessages((prev) => {
 				const exists = prev.some((m) => m.id === id);
@@ -412,6 +458,7 @@ export function useSolarRuntime(
 									connectionStatus: connectionStatus ?? m.connectionStatus,
 									reasoning,
 									toolCalls: toolCalls ?? m.toolCalls,
+									metrics: metrics ?? m.metrics,
 								}
 							: m,
 					);
@@ -427,6 +474,7 @@ export function useSolarRuntime(
 						connectionStatus,
 						reasoning,
 						toolCalls,
+						metrics,
 					},
 				];
 			});
@@ -440,6 +488,8 @@ export function useSolarRuntime(
 			let reasoning = "";
 			let toolCalls: SolarToolCall[] = [];
 			let source: EventSource | null = null;
+			let connectionStartedAt: number | null = null;
+			let firstTokenAt: number | null = null;
 			let resolveCompletion: (() => void) | null = null;
 			const completed = new Promise<void>((resolve) => {
 				resolveCompletion = resolve;
@@ -454,11 +504,41 @@ export function useSolarRuntime(
 					return;
 				if (Number.isSafeInteger(parsedId)) lastEventIdRef.current = parsedId;
 				if (chunk.type === "text-delta") {
+					if (chunk.textDelta && firstTokenAt === null)
+						firstTokenAt = performance.now();
 					text += chunk.textDelta;
 					upsertAssistant(displayId, text, reasoning || undefined, toolCalls);
 				} else if (chunk.type === "reasoning-delta") {
+					if (chunk.delta && firstTokenAt === null)
+						firstTokenAt = performance.now();
 					reasoning += chunk.delta;
 					upsertAssistant(displayId, text, reasoning, toolCalls);
+				} else if (chunk.type === "finish") {
+					const endedAt = performance.now();
+					const outputTokens = chunk.usage.outputTokens;
+					const metrics: SolarMetrics = {
+						ttftMs:
+							connectionStartedAt !== null && firstTokenAt !== null
+								? firstTokenAt - connectionStartedAt
+								: null,
+						tps:
+							firstTokenAt !== null && outputTokens >= 0 && endedAt > firstTokenAt
+									? outputTokens / ((endedAt - firstTokenAt) / 1000)
+									: null,
+						e2e:
+							connectionStartedAt !== null &&
+								outputTokens >= 0 &&
+								endedAt > connectionStartedAt
+									? outputTokens / ((endedAt - connectionStartedAt) / 1000)
+									: null,
+						inputTokens: chunk.usage.inputTokens ?? null,
+						outputTokens: chunk.usage.outputTokens ?? null,
+						reasoningTokens: chunk.usage.reasoningTokens ?? null,
+						cacheReadTokens: chunk.usage.cacheReadTokens ?? null,
+						cacheWriteTokens: chunk.usage.cacheWriteTokens ?? null,
+					};
+					metricsByMessageRef.current.set(displayId, metrics);
+					upsertAssistant(displayId, text, reasoning || undefined, toolCalls, undefined, metrics);
 				} else if (chunk.type === "tool-call-start") {
 					toolCalls = [
 						...toolCalls,
@@ -508,6 +588,7 @@ export function useSolarRuntime(
 			};
 			const connect = () => {
 				source?.close();
+				connectionStartedAt ??= performance.now();
 				const query = new URLSearchParams({ messageId });
 				if (lastEventIdRef.current > 0)
 					query.set("lastEventId", String(lastEventIdRef.current));
@@ -585,6 +666,8 @@ export function useSolarRuntime(
 				content: r.text,
 				createdAt: r.createdAt,
 				reasoning: r.reasoning ?? undefined,
+				metrics:
+					metricsByMessageRef.current.get(r.id) ?? parseMessageMetrics(r.parts),
 				toolCalls: toolCallsByMessageRef.current.get(r.id) ?? r.toolCalls,
 				parts: r.parts,
 				summaryEvent:

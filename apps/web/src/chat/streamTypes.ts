@@ -20,7 +20,13 @@ export type UiChunk =
 	| {
 			type: "finish";
 			finishReason: string;
-			usage: { inputTokens: number; outputTokens: number };
-	  }
+			usage: {
+				inputTokens: number;
+				outputTokens: number;
+				reasoningTokens?: number;
+				cacheReadTokens?: number;
+				cacheWriteTokens?: number;
+			};
+		  }
 	| { type: "title-update"; title: string }
 	| { type: "error"; errorText: string };

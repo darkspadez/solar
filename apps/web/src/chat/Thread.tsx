@@ -54,6 +54,7 @@ import { MarkdownText, PlainMarkdown } from "./MarkdownText";
 import {
 	parseTimelineItems,
 	type SolarConnectionStatus,
+	type SolarMetrics,
 	type SolarSummaryEvent,
 	type SolarToolCall,
 	type TimelineItem,
@@ -956,6 +957,41 @@ function ReasoningBlock({ text }: { text: string }) {
 	);
 }
 
+function formatMetric(value: number | null, suffix = "") {
+	if (value == null || !Number.isFinite(value)) return "-";
+	return `${value < 100 ? value.toFixed(1) : Math.round(value)}${suffix}`;
+}
+
+function formatDuration(ms: number | null) {
+	if (ms == null || !Number.isFinite(ms)) return "-";
+	return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
+}
+
+function AssistantMetrics({ metrics }: { metrics?: SolarMetrics }) {
+	const values = metrics ?? {
+		ttftMs: null,
+		tps: null,
+		e2e: null,
+		inputTokens: null,
+		outputTokens: null,
+		reasoningTokens: null,
+		cacheReadTokens: null,
+		cacheWriteTokens: null,
+	};
+	return (
+		<span className="solar-metrics" title="Response performance and token usage">
+			<span>TTFT: {formatDuration(values.ttftMs)}</span>
+			<span>TPS: {formatMetric(values.tps, " t/s")}</span>
+			<span>E2E: {formatMetric(values.e2e, " t/s")}</span>
+			<span>
+				I/O/R/C/W: {values.inputTokens ?? "-"}/{values.outputTokens ?? "-"}/
+				{values.reasoningTokens ?? "-"}/{values.cacheReadTokens ?? "-"}/
+				{values.cacheWriteTokens ?? "-"}
+			</span>
+		</span>
+	);
+}
+
 function AssistantMessage() {
 	const displayMode = useContext(DisplayModeContext);
 	const parts = useAuiState(
@@ -1024,6 +1060,14 @@ function AssistantMessage() {
 				?.createdAt,
 	);
 	const modelName = useContext(ModelNameContext) ?? "Assistant";
+	const metrics = useAuiState(
+		(s) =>
+			(
+				s.message.metadata?.custom as
+					| { metrics?: SolarMetrics }
+					| undefined
+			)?.metrics,
+	);
 	const timestamp = formatMessageTimestamp(createdAt);
 
 	return (
@@ -1120,6 +1164,7 @@ function AssistantMessage() {
 					>
 						<Repeat2 size={16} />
 					</ActionBarPrimitive.Reload>
+					<AssistantMetrics metrics={metrics} />
 				</ActionBarPrimitive.Root>
 			</div>
 			<SummaryEventMarker position="after" />
