@@ -967,6 +967,11 @@ function formatDuration(ms: number | null) {
 	return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
 }
 
+function formatMetricTokens(tokens: number | null) {
+	if (tokens == null || !Number.isFinite(tokens)) return "-";
+	return `${(tokens / 1_000).toFixed(1)}k`;
+}
+
 function AssistantMetrics({ metrics }: { metrics?: SolarMetrics }) {
 	const values = metrics ?? {
 		ttftMs: null,
@@ -984,9 +989,11 @@ function AssistantMetrics({ metrics }: { metrics?: SolarMetrics }) {
 			<span>TPS: {formatMetric(values.tps, " t/s")}</span>
 			<span>E2E: {formatMetric(values.e2e, " t/s")}</span>
 			<span>
-				I/O/R/C/W: {values.inputTokens ?? "-"}/{values.outputTokens ?? "-"}/
-				{values.reasoningTokens ?? "-"}/{values.cacheReadTokens ?? "-"}/
-				{values.cacheWriteTokens ?? "-"}
+				I/O/R/C/W: {formatMetricTokens(values.inputTokens)}/
+				{formatMetricTokens(values.outputTokens)}/
+				{formatMetricTokens(values.reasoningTokens)}/
+				{formatMetricTokens(values.cacheReadTokens)}/
+				{formatMetricTokens(values.cacheWriteTokens)}
 			</span>
 		</span>
 	);

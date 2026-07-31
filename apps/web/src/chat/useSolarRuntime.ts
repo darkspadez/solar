@@ -537,7 +537,7 @@ export function useSolarRuntime(
 						cacheReadTokens: chunk.usage.cacheReadTokens ?? null,
 						cacheWriteTokens: chunk.usage.cacheWriteTokens ?? null,
 					};
-					metricsByMessageRef.current.set(displayId, metrics);
+					metricsByMessageRef.current.set(messageId, metrics);
 					upsertAssistant(displayId, text, reasoning || undefined, toolCalls, undefined, metrics);
 				} else if (chunk.type === "tool-call-start") {
 					toolCalls = [
