@@ -1,8 +1,6 @@
 import {
 	useExternalStoreRuntime,
 	createMessageQueue,
-	type CompleteAttachment,
-	type ThreadMessageLike,
 	type AppendMessage,
 } from "@assistant-ui/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -13,15 +11,28 @@ import {
 	isDocumentMimeType,
 	SolarAttachmentAdapter,
 } from "./attachmentAdapter";
-import type { UiChunk } from "./streamTypes";
+import { consumeChatStream } from "./consumeChatStream";
+import {
+	convertMessage,
+	parseMessageMetrics,
+	type SolarAttachmentMeta,
+	type SolarConnectionStatus,
+	type SolarMessage,
+	type SolarMetrics,
+	type SolarSummaryEvent,
+	type SolarToolCall,
+	type TimelineItem,
+} from "./solarMessages";
+export { parseTimelineItems } from "./solarMessages";
 import { parseSkillCommand, type SkillOption } from "./skillCommands";
 
-interface SolarAttachmentMeta {
-	id: string;
-	filename: string;
-	mimeType: string;
-	kind: "image" | "text" | "document";
-}
+export type {
+	SolarConnectionStatus,
+	SolarMetrics,
+	SolarSummaryEvent,
+	SolarToolCall,
+	TimelineItem,
+} from "./solarMessages";
 
 interface UserLocation {
 	timeZone: string;
@@ -29,344 +40,6 @@ interface UserLocation {
 	longitude?: number;
 	accuracy?: number;
 	timestamp?: number;
-}
-
-interface SolarMessage {
-	id: string;
-	role: "user" | "assistant";
-	content: string;
-	createdAt?: string;
-	connectionStatus?: SolarConnectionStatus;
-	isStale?: boolean;
-	forceStop?: () => Promise<void>;
-	reasoning?: string;
-	toolCalls?: SolarToolCall[];
-	summaryEvent?: SolarSummaryEvent;
-	attachments?: SolarAttachmentMeta[];
-	skillInvocation?: { name: string } | null;
-	metrics?: SolarMetrics;
-}
-
-export type SolarConnectionStatus = "connecting" | "request-sent";
-
-export interface SolarMetrics {
-	ttftMs: number | null;
-	tps: number | null;
-	e2e: number | null;
-	inputTokens: number | null;
-	outputTokens: number | null;
-	reasoningTokens: number | null;
-	cacheReadTokens: number | null;
-	cacheWriteTokens: number | null;
-}
-
-export interface SolarSummaryEvent {
-	tokensBefore: number | null;
-	tokensAfter: number | null;
-	revision: number | null;
-	createdAt: string | null;
-	position: "before" | "after";
-}
-
-export interface SolarToolCall {
-	id: string;
-	name: string;
-	serverName?: string;
-	remoteName?: string;
-	args: string;
-	status: "streaming" | "executing" | "complete" | "error";
-	output?: string;
-}
-
-export type TimelineItem =
-	| { kind: "reasoning"; id: string; text: string }
-	| { kind: "toolCalls"; id: string; calls: SolarToolCall[] }
-	| { kind: "text"; id: string; text: string };
-
-export function parseTimelineItems(
-	partsStr: string | null | undefined,
-	fallbackText: string,
-	fallbackReasoning?: string,
-	fallbackToolCalls?: SolarToolCall[],
-): TimelineItem[] {
-	let solarToolCalls: SolarToolCall[] = fallbackToolCalls ?? [];
-	let contentParts: Array<{
-		type?: string;
-		thinking?: string;
-		text?: string;
-		id?: string;
-		name?: string;
-	}> = [];
-
-	if (partsStr) {
-		try {
-			const parsed = JSON.parse(partsStr) as {
-				content?: Array<{
-					type?: string;
-					thinking?: string;
-					text?: string;
-					id?: string;
-					name?: string;
-				}>;
-				solarToolCalls?: SolarToolCall[];
-			};
-			if (Array.isArray(parsed.solarToolCalls)) {
-				solarToolCalls = parsed.solarToolCalls;
-			}
-			if (Array.isArray(parsed.content)) {
-				contentParts = parsed.content;
-			}
-		} catch {
-			// ignore JSON error
-		}
-	}
-
-	const toolMap = new Map<string, SolarToolCall>();
-	for (const call of solarToolCalls) {
-		toolMap.set(call.id, call);
-	}
-
-	const placedToolIds = new Set<string>();
-	const items: TimelineItem[] = [];
-
-	if (contentParts.length > 0) {
-		for (const part of contentParts) {
-			if (part.type === "thinking" && part.thinking) {
-				const last = items.at(-1);
-				if (last && last.kind === "reasoning") {
-					last.text += part.thinking;
-				} else {
-					items.push({
-						kind: "reasoning",
-						id: `reasoning-${items.length}`,
-						text: part.thinking,
-					});
-				}
-			} else if (part.type === "toolCall") {
-				const id = part.id;
-				if (id) placedToolIds.add(id);
-				const call = id ? toolMap.get(id) : undefined;
-				const fallbackCall: SolarToolCall = call ?? {
-					id: id ?? `call-${items.length}`,
-					name: part.name ?? "tool",
-					args: "",
-					status: "complete",
-				};
-				const last = items.at(-1);
-				if (last && last.kind === "toolCalls") {
-					if (!last.calls.some((c) => c.id === fallbackCall.id)) {
-						last.calls.push(fallbackCall);
-					}
-				} else {
-					items.push({
-						kind: "toolCalls",
-						id: `tools-${items.length}`,
-						calls: [fallbackCall],
-					});
-				}
-			} else if (part.type === "text" && part.text) {
-				const last = items.at(-1);
-				if (last && last.kind === "text") {
-					last.text += part.text;
-				} else {
-					items.push({
-						kind: "text",
-						id: `text-${items.length}`,
-						text: part.text,
-					});
-				}
-			}
-		}
-	}
-
-	const unplacedCalls = solarToolCalls.filter(
-		(call) => !placedToolIds.has(call.id),
-	);
-
-	if (unplacedCalls.length > 0) {
-		if (items.length === 0) {
-			if (fallbackReasoning) {
-				items.push({
-					kind: "reasoning",
-					id: "reasoning-fallback",
-					text: fallbackReasoning,
-				});
-			}
-			const paragraphs = fallbackText.split(/\n\n+/).filter(Boolean);
-			if (paragraphs.length > 1) {
-				paragraphs.forEach((p, idx) => {
-					items.push({
-						kind: "text",
-						id: `text-p-${idx}`,
-						text: p,
-					});
-					if (idx < unplacedCalls.length) {
-						items.push({
-							kind: "toolCalls",
-							id: `tools-unplaced-${idx}`,
-							calls: [unplacedCalls[idx]!],
-						});
-					}
-				});
-				if (unplacedCalls.length > paragraphs.length) {
-					const remaining = unplacedCalls.slice(paragraphs.length);
-					items.push({
-						kind: "toolCalls",
-						id: "tools-unplaced-remaining",
-						calls: remaining,
-					});
-				}
-			} else {
-				items.push({
-					kind: "toolCalls",
-					id: "tools-unplaced-all",
-					calls: unplacedCalls,
-				});
-				if (fallbackText) {
-					items.push({
-						kind: "text",
-						id: "text-fallback",
-						text: fallbackText,
-					});
-				}
-			}
-		} else {
-			const textIndices: number[] = [];
-			items.forEach((item, idx) => {
-				if (item.kind === "text") textIndices.push(idx);
-			});
-
-			if (textIndices.length > 1 && unplacedCalls.length > 0) {
-				const newItems: TimelineItem[] = [];
-				let callIdx = 0;
-				items.forEach((item) => {
-					newItems.push(item);
-					if (item.kind === "text" && callIdx < unplacedCalls.length) {
-						newItems.push({
-							kind: "toolCalls",
-							id: `tools-interleaved-${callIdx}`,
-							calls: [unplacedCalls[callIdx]!],
-						});
-						callIdx++;
-					}
-				});
-				while (callIdx < unplacedCalls.length) {
-					newItems.push({
-						kind: "toolCalls",
-						id: `tools-interleaved-${callIdx}`,
-						calls: [unplacedCalls[callIdx]!],
-					});
-					callIdx++;
-				}
-				return newItems;
-			} else {
-				const firstTextIdx = items.findIndex((i) => i.kind === "text");
-				if (firstTextIdx >= 0) {
-					items.splice(firstTextIdx, 0, {
-						kind: "toolCalls",
-						id: "tools-unplaced-group",
-						calls: unplacedCalls,
-					});
-				} else {
-					items.push({
-						kind: "toolCalls",
-						id: "tools-unplaced-group",
-						calls: unplacedCalls,
-					});
-				}
-			}
-		}
-	} else if (items.length === 0) {
-		if (fallbackReasoning) {
-			items.push({
-				kind: "reasoning",
-				id: "reasoning-fallback",
-				text: fallbackReasoning,
-			});
-		}
-		if (fallbackText) {
-			items.push({
-				kind: "text",
-				id: "text-fallback",
-				text: fallbackText,
-			});
-		}
-	}
-
-	return items;
-}
-
-function toCompleteAttachment(a: SolarAttachmentMeta): CompleteAttachment {
-	return {
-		id: a.id,
-		type: a.kind === "image" ? "image" : "document",
-		name: a.filename,
-		contentType: a.mimeType,
-		status: { type: "complete" },
-		content:
-			a.kind === "image"
-				? [{ type: "image", image: `/api/attachments/${a.id}` }]
-				: [{ type: "text", text: "" }],
-	};
-}
-
-function convertMessage(m: SolarMessage): ThreadMessageLike {
-	return {
-		id: m.id,
-		role: m.role,
-		content: [
-			...(m.reasoning
-				? [{ type: "reasoning" as const, text: m.reasoning }]
-				: []),
-			{ type: "text", text: m.content },
-		],
-		attachments: m.attachments?.map(toCompleteAttachment),
-		metadata: {
-			custom: {
-				createdAt: m.createdAt,
-				connectionStatus: m.connectionStatus,
-				isStale: m.isStale,
-				forceStop: m.forceStop,
-				toolCalls: m.toolCalls,
-				summaryEvent: m.summaryEvent,
-				skillInvocation: m.skillInvocation,
-				metrics: m.metrics,
-			},
-		},
-	};
-}
-
-function parseMessageMetrics(parts: string | null | undefined): SolarMetrics | undefined {
-	if (!parts) return undefined;
-	try {
-		const parsed = JSON.parse(parts) as {
-			usage?: {
-				input?: unknown;
-				output?: unknown;
-				reasoning?: unknown;
-				cacheRead?: unknown;
-				cacheWrite?: unknown;
-			};
-			solarMetrics?: Partial<SolarMetrics>;
-		};
-		const usage = parsed.usage;
-		const metrics = parsed.solarMetrics;
-		if (!usage && !metrics) return undefined;
-		const numberOrNull = (value: unknown) =>
-			typeof value === "number" && Number.isFinite(value) ? value : null;
-		return {
-			ttftMs: numberOrNull(metrics?.ttftMs),
-			tps: numberOrNull(metrics?.tps),
-			e2e: numberOrNull(metrics?.e2e),
-			inputTokens: numberOrNull(usage?.input),
-			outputTokens: numberOrNull(usage?.output),
-			reasoningTokens: numberOrNull(usage?.reasoning),
-			cacheReadTokens: numberOrNull(usage?.cacheRead),
-			cacheWriteTokens: numberOrNull(usage?.cacheWrite),
-		};
-	} catch {
-		return undefined;
-	}
 }
 
 function appendText(message: AppendMessage): string {
@@ -486,152 +159,24 @@ export function useSolarRuntime(
 
 	const consume = useCallback(
 		async (messageId: string, displayId: string, resetEventId = true) => {
-			let text = "";
-			let reasoning = "";
-			let toolCalls: SolarToolCall[] = [];
-			let source: EventSource | null = null;
-			let connectionStartedAt: number | null = null;
-			let firstTokenAt: number | null = null;
-			let resolveCompletion: (() => void) | null = null;
-			const completed = new Promise<void>((resolve) => {
-				resolveCompletion = resolve;
-			});
-			finishStreamRef.current = resolveCompletion;
-			const handleChunk = (chunk: UiChunk, eventId: string) => {
-				const parsedId = Number(eventId);
-				if (
-					Number.isSafeInteger(parsedId) &&
-					parsedId <= lastEventIdRef.current
-				)
-					return;
-				if (Number.isSafeInteger(parsedId)) lastEventIdRef.current = parsedId;
-				if (chunk.type === "text-delta") {
-					if (chunk.textDelta && firstTokenAt === null)
-						firstTokenAt = performance.now();
-					text += chunk.textDelta;
-					upsertAssistant(displayId, text, reasoning || undefined, toolCalls);
-				} else if (chunk.type === "reasoning-delta") {
-					if (chunk.delta && firstTokenAt === null)
-						firstTokenAt = performance.now();
-					reasoning += chunk.delta;
-					upsertAssistant(displayId, text, reasoning, toolCalls);
-				} else if (chunk.type === "finish") {
-					const endedAt = performance.now();
-					const outputTokens = chunk.usage.outputTokens;
-					const metrics: SolarMetrics = {
-						ttftMs:
-							connectionStartedAt !== null && firstTokenAt !== null
-								? firstTokenAt - connectionStartedAt
-								: null,
-						tps:
-							firstTokenAt !== null && outputTokens >= 0 && endedAt > firstTokenAt
-									? outputTokens / ((endedAt - firstTokenAt) / 1000)
-									: null,
-						e2e:
-							connectionStartedAt !== null &&
-								outputTokens >= 0 &&
-								endedAt > connectionStartedAt
-									? outputTokens / ((endedAt - connectionStartedAt) / 1000)
-									: null,
-						inputTokens: chunk.usage.inputTokens ?? null,
-						outputTokens: chunk.usage.outputTokens ?? null,
-						reasoningTokens: chunk.usage.reasoningTokens ?? null,
-						cacheReadTokens: chunk.usage.cacheReadTokens ?? null,
-						cacheWriteTokens: chunk.usage.cacheWriteTokens ?? null,
-					};
-					metricsByMessageRef.current.set(messageId, metrics);
-					upsertAssistant(displayId, text, reasoning || undefined, toolCalls, undefined, metrics);
-				} else if (chunk.type === "tool-call-start") {
-					toolCalls = [
-						...toolCalls,
-						{
-							id: chunk.toolCallId,
-							name: chunk.toolName,
-							serverName: chunk.serverName,
-							remoteName: chunk.remoteName,
-							args: "",
-							status: "streaming",
-						},
-					];
-					upsertAssistant(displayId, text, reasoning || undefined, toolCalls);
-				} else if (chunk.type === "tool-call-delta") {
-					toolCalls = toolCalls.map((call) =>
-						call.id === chunk.toolCallId
-							? { ...call, args: call.args + chunk.argsText }
-							: call,
-					);
-					upsertAssistant(displayId, text, reasoning || undefined, toolCalls);
-				} else if (chunk.type === "tool-call-end") {
-					toolCalls = toolCalls.map((call) =>
-						call.id === chunk.toolCallId
-							? { ...call, status: "executing" }
-							: call,
-					);
-					upsertAssistant(displayId, text, reasoning || undefined, toolCalls);
-				} else if (chunk.type === "tool-call-result") {
-					toolCalls = toolCalls.map((call) =>
-						call.id === chunk.toolCallId
-							? {
-									...call,
-									output: chunk.output,
-									status: chunk.isError ? "error" : "complete",
-								}
-							: call,
-					);
-					upsertAssistant(displayId, text, reasoning || undefined, toolCalls);
-				} else if (chunk.type === "error") {
-					text += `\n\n_Error: ${chunk.errorText}_`;
-					upsertAssistant(displayId, text, reasoning || undefined, toolCalls);
-				} else if (chunk.type === "title-update") {
+			return consumeChatStream({
+				messageId,
+				displayId,
+				resetEventId,
+				lastEventIdRef,
+				eventSourceRef,
+				reconnectRef,
+				finishStreamRef,
+				assistantIdRef,
+				toolCallsByMessageRef,
+				metricsByMessageRef,
+				setIsRunning,
+				upsertAssistant,
+				onTitleUpdate: () =>
 					queryClient.invalidateQueries({
 						queryKey: trpc.conversation.list.queryKey(),
-					});
-				}
-			};
-			const connect = () => {
-				source?.close();
-				connectionStartedAt ??= performance.now();
-				const query = new URLSearchParams({ messageId });
-				if (lastEventIdRef.current > 0)
-					query.set("lastEventId", String(lastEventIdRef.current));
-				source = new EventSource(`/api/chat/stream?${query}`);
-				eventSourceRef.current = source;
-				source.onmessage = (event) => {
-					if (event.data === "[DONE]") {
-						source?.close();
-						resolveCompletion?.();
-						return;
-					}
-					handleChunk(JSON.parse(event.data) as UiChunk, event.lastEventId);
-				};
-				source.onerror = () => {
-					// EventSource retries transient failures on its own; CLOSED means
-					// a terminal HTTP error (e.g. 401/404) and it will never reconnect,
-					// so finish the stream instead of leaving the run hanging forever.
-					if (source?.readyState === EventSource.CLOSED) {
-						resolveCompletion?.();
-					}
-				};
-			};
-			reconnectRef.current = connect;
-			setIsRunning(true);
-			upsertAssistant(displayId, "", undefined, undefined, "request-sent");
-			if (resetEventId) lastEventIdRef.current = 0;
-			connect();
-			try {
-				await completed;
-			} finally {
-				eventSourceRef.current?.close();
-				eventSourceRef.current = null;
-				if (reconnectRef.current === connect) reconnectRef.current = null;
-				if (finishStreamRef.current === resolveCompletion)
-					finishStreamRef.current = null;
-				if (toolCalls.length && assistantIdRef.current) {
-					toolCallsByMessageRef.current.set(assistantIdRef.current, toolCalls);
-				}
-				setIsRunning(false);
-				assistantIdRef.current = null;
-			}
+					}),
+			});
 		},
 		[queryClient, trpc.conversation.list, upsertAssistant],
 	);
