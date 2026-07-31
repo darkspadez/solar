@@ -347,20 +347,22 @@ function parseMessageMetrics(parts: string | null | undefined): SolarMetrics | u
 				cacheRead?: unknown;
 				cacheWrite?: unknown;
 			};
+			solarMetrics?: Partial<SolarMetrics>;
 		};
 		const usage = parsed.usage;
-		if (!usage) return undefined;
+		const metrics = parsed.solarMetrics;
+		if (!usage && !metrics) return undefined;
 		const numberOrNull = (value: unknown) =>
 			typeof value === "number" && Number.isFinite(value) ? value : null;
 		return {
-			ttftMs: null,
-			tps: null,
-			e2e: null,
-			inputTokens: numberOrNull(usage.input),
-			outputTokens: numberOrNull(usage.output),
-			reasoningTokens: numberOrNull(usage.reasoning),
-			cacheReadTokens: numberOrNull(usage.cacheRead),
-			cacheWriteTokens: numberOrNull(usage.cacheWrite),
+			ttftMs: numberOrNull(metrics?.ttftMs),
+			tps: numberOrNull(metrics?.tps),
+			e2e: numberOrNull(metrics?.e2e),
+			inputTokens: numberOrNull(usage?.input),
+			outputTokens: numberOrNull(usage?.output),
+			reasoningTokens: numberOrNull(usage?.reasoning),
+			cacheReadTokens: numberOrNull(usage?.cacheRead),
+			cacheWriteTokens: numberOrNull(usage?.cacheWrite),
 		};
 	} catch {
 		return undefined;

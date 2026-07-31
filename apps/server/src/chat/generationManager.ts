@@ -80,6 +80,13 @@ interface Generation {
 	text: string;
 	reasoning: string;
 	parts: unknown | null;
+	metrics: {
+		ttftMs: number | null;
+		tps: number | null;
+		e2e: number | null;
+	};
+	startedAt: number;
+	firstTokenAt: number | null;
 	toolCalls: PersistedToolCall[];
 	usage: {
 		inputTokens: number;
@@ -181,6 +188,9 @@ export class GenerationManager {
 			text: "",
 			reasoning: "",
 			parts: null,
+			metrics: { ttftMs: null, tps: null, e2e: null },
+			startedAt: performance.now(),
+			firstTokenAt: null,
 			toolCalls: [],
 			usage: {
 				inputTokens: 0,
@@ -371,9 +381,33 @@ export class GenerationManager {
 						if (event.type === "error") {
 							throw new Error(event.error.errorMessage ?? "Generation failed");
 						}
-						if (event.type === "text_delta") gen.text += event.delta;
-						if (event.type === "thinking_delta") gen.reasoning += event.delta;
+						if (event.type === "text_delta") {
+							if (event.delta && gen.firstTokenAt === null)
+								gen.firstTokenAt = performance.now();
+							gen.text += event.delta;
+						}
+						if (event.type === "thinking_delta") {
+							if (event.delta && gen.firstTokenAt === null)
+								gen.firstTokenAt = performance.now();
+							gen.reasoning += event.delta;
+						}
 						if (event.type === "done") {
+							const finishedAt = performance.now();
+							const outputTokens = event.message.usage.output;
+							gen.metrics = {
+								ttftMs:
+									gen.firstTokenAt === null
+										? null
+										: gen.firstTokenAt - gen.startedAt,
+								tps:
+									gen.firstTokenAt !== null && finishedAt > gen.firstTokenAt
+										? outputTokens / ((finishedAt - gen.firstTokenAt) / 1000)
+										: null,
+								e2e:
+									finishedAt > gen.startedAt
+										? outputTokens / ((finishedAt - gen.startedAt) / 1000)
+										: null,
+							};
 							// Store the whole pi assistant message so context can be
 							// reconstructed losslessly on later turns.
 							gen.parts = event.message;
@@ -549,7 +583,10 @@ export class GenerationManager {
 		// The tool loop's intermediate assistant/toolResult messages must be
 		// persisted as the ordered, separate pi-ai messages they actually are —
 		// not flattened into one synthetic combined message.
-		const persistedParts = withPersistedReasoning(gen.parts, gen.reasoning);
+		const persistedParts = withPersistedMetrics(
+			withPersistedReasoning(gen.parts, gen.reasoning),
+			gen.metrics,
+		);
 		await gen.persist({
 			steps: gen.steps,
 			parts: persistedParts,
@@ -583,6 +620,14 @@ function withPersistedReasoning(parts: unknown, reasoning: string): unknown {
 	}
 	message.content = content;
 	return message;
+}
+
+function withPersistedMetrics(
+	parts: unknown,
+	metrics: Generation["metrics"],
+): unknown {
+	if (!parts || typeof parts !== "object") return parts;
+	return { ...(parts as Record<string, unknown>), solarMetrics: metrics };
 }
 
 function parseTitle(response: string): string | null {
