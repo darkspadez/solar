@@ -302,12 +302,31 @@ function CodeHighlighter({
 	);
 }
 
+function MarkdownTable({
+	children,
+	node: _node,
+	...props
+}: ComponentProps<"table"> & { node?: unknown }) {
+	return (
+		<div className="solar-markdown-table">
+			<table {...props}>{children}</table>
+		</div>
+	);
+}
+
 /**
  * Lightweight Markdown renderer for plain strings (e.g. reasoning/"Thought"
  * content) so bold/lists/etc. render instead of leaking literal `**` markers.
  */
 export function PlainMarkdown({ text }: { text: string }) {
-	return <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>;
+	return (
+		<ReactMarkdown
+			remarkPlugins={[remarkGfm]}
+			components={{ table: MarkdownTable }}
+		>
+			{text}
+		</ReactMarkdown>
+	);
 }
 
 /**
@@ -343,6 +362,7 @@ export function MarkdownText() {
 				}
 				remarkPlugins={[remarkGfm]}
 				components={{
+					table: MarkdownTable,
 					SyntaxHighlighter: (props) => (
 						<CodeHighlighter {...props} dark={dark} />
 					),

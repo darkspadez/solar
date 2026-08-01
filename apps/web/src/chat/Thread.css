@@ -333,6 +333,25 @@
   overflow-x: auto;
 }
 
+.solar-markdown-table {
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+}
+
+.solar-markdown-table th,
+.solar-markdown-table td {
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+@media (width < 40rem) {
+  .solar-markdown-table table {
+    min-width: 36rem;
+  }
+}
+
 .solar-action-btn {
   display: inline-flex;
   align-items: center;

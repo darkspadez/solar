@@ -18,6 +18,17 @@ describe("PlainMarkdown", () => {
 		expect(screen.getByText("$4 per gallon")).toBeTruthy();
 		expect(screen.getByText("$90 per barrel")).toBeTruthy();
 	});
+
+	test("wraps tables in a horizontally scrollable container", () => {
+		const { container } = render(
+			createElement(PlainMarkdown, {
+				text: "| Name | Value |\n| --- | --- |\n| Solar | 1 |",
+			}),
+		);
+
+		const tableContainer = container.querySelector(".solar-markdown-table");
+		expect(tableContainer?.querySelector("table")).toBeTruthy();
+	});
 });
 
 describe("citationsFrom", () => {

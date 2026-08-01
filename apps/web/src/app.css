@@ -165,7 +165,7 @@
 .solar-sidebar button, .solar-sidebar input, .solar-sidebar select { color: var(--color-base-content) !important; }
 .solar-sidebar input, .solar-sidebar select { background: var(--color-base-100) !important; border-color: var(--color-base-300) !important; }
 .solar-sidebar input.solar-search-input { background: transparent !important; border: 0 !important; }
-.solar-main { min-width: 0; touch-action: pan-y; }
+.solar-main { min-width: 0; touch-action: pan-x pan-y; }
 .solar-user-output, .solar-assistant-output { color: var(--color-base-content) !important; }
 .solar-user-output { background: color-mix(in oklch, var(--color-primary) 18%, var(--color-base-100)) !important; }
 .solar-action-btn, .solar-reasoning-toggle, .solar-attachment-remove { color: var(--color-base-content) !important; }
