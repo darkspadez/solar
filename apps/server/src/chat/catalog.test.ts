@@ -92,6 +92,38 @@ const privateModel = {
 	modelId: "private-model",
 	api: "anthropic-messages",
 };
+const mockModels = [
+	{
+		provider: "mock",
+		endpointId: "mock",
+		modelId: "mock-reasoning",
+		api: "mock",
+		name: "Mock (reasoning)",
+		reasoning: true,
+		vision: false,
+		documents: false,
+	},
+	{
+		provider: "mock",
+		endpointId: "mock",
+		modelId: "mock-vision",
+		api: "mock",
+		name: "Mock (vision)",
+		reasoning: false,
+		vision: true,
+		documents: false,
+	},
+];
+const mockReasoningSelection = {
+	provider: "mock",
+	endpointId: "mock",
+	modelId: "mock-reasoning",
+	api: "mock",
+};
+
+function withMockModels<T>(models: T[]) {
+	return catalog.MOCK ? [...models, ...mockModels] : models;
+}
 
 beforeEach(() => {
 	state.providerConfigs = [];
@@ -158,34 +190,38 @@ describe("catalog model policy", () => {
 			],
 		});
 
-		expect(await catalog.listAvailableModels()).toEqual([
-			{
-				...publicModel,
-				name: publicModel.modelId,
-				reasoning: false,
-				vision: false,
-				documents: false,
-			},
-		]);
-		expect(await catalog.listAvailableModels(true)).toEqual([
-			{
-				...publicModel,
-				name: publicModel.modelId,
-				reasoning: false,
-				vision: false,
-				documents: false,
-			},
-			{
-				provider: "openai",
-				endpointId: "openai-completions",
-				modelId: "private-openai",
-				api: "openai-completions",
-				name: "private-openai",
-				reasoning: false,
-				vision: false,
-				documents: false,
-			},
-		]);
+		expect(await catalog.listAvailableModels()).toEqual(
+			withMockModels([
+				{
+					...publicModel,
+					name: publicModel.modelId,
+					reasoning: false,
+					vision: false,
+					documents: false,
+				},
+			]),
+		);
+		expect(await catalog.listAvailableModels(true)).toEqual(
+			withMockModels([
+				{
+					...publicModel,
+					name: publicModel.modelId,
+					reasoning: false,
+					vision: false,
+					documents: false,
+				},
+				{
+					provider: "openai",
+					endpointId: "openai-completions",
+					modelId: "private-openai",
+					api: "openai-completions",
+					name: "private-openai",
+					reasoning: false,
+					vision: false,
+					documents: false,
+				},
+			]),
+		);
 	});
 
 	test("uses builtin catalog names for custom provider endpoints", async () => {
@@ -308,9 +344,14 @@ describe("catalog model policy", () => {
 		await expect(catalog.resolveSelection({})).resolves.toEqual(publicModel);
 
 		state.providerConfigs = [];
-		await expect(catalog.resolveSelection({})).rejects.toThrow(
-			"No models are configured",
-		);
+		if (catalog.MOCK)
+			await expect(catalog.resolveSelection({})).resolves.toEqual(
+				mockReasoningSelection,
+			);
+		else
+			await expect(catalog.resolveSelection({})).rejects.toThrow(
+				"No models are configured",
+			);
 	});
 
 	test("uses only public task models and falls back when the configured task model is unavailable", async () => {

@@ -65,8 +65,13 @@ case "${1:-}" in
       exit 0
     fi
     if [ "${2:-}" = "--foreground" ]; then
+      : > "$LOGFILE"
       cd "$ROOT/apps/server"
-      exec env PORT="$SERVER_PORT" SOLAR_SEED_DEV_USER=1 bun --env-file=../../.env run dev
+      set +e
+      env PORT="$SERVER_PORT" SOLAR_SEED_DEV_USER=1 bun --env-file=../../.env run dev 2>&1 | tee "$LOGFILE"
+      status="${PIPESTATUS[0]}"
+      set -e
+      exit "$status"
     fi
     : > "$LOGFILE"
     PORT="$SERVER_PORT" SOLAR_SEED_DEV_USER=1 setsid bash -c 'cd "'"$ROOT"'/apps/server" && exec bun --env-file=../../.env run dev' \

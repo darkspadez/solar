@@ -1,8 +1,10 @@
 import { trpcServer } from "@hono/trpc-server";
+import { Server as SocketEngine } from "@socket.io/bun-engine";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import * as path from "node:path";
-import { logger } from "./logger";
+import { Server as SocketIoServer } from "socket.io";
+import { getLogLevel, logger } from "./logger";
 import { config } from "./config";
 import { auth } from "./auth";
 import { db, sqlite } from "./db";
@@ -14,6 +16,8 @@ import { chatRoutes } from "./chat/routes";
 import { chatV2Repository } from "./chat/v2Live";
 import { createContext } from "./trpc/context";
 import { appRouter } from "./trpc/router";
+import { createOpenWebUiRoutes } from "./openwebui/routes";
+import { OpenWebUiSocketGateway } from "./openwebui/socket";
 
 const isProduction = process.env.NODE_ENV === "production";
 // Production serves the bundled web assets.
@@ -29,6 +33,83 @@ const webDirectory = path.join(
 const webPublicDirectory = path.resolve(import.meta.dir, "../../web/public");
 const webIndex = Bun.file(path.join(webDirectory, "index.html"));
 const hashedAssetName = /-[a-z0-9]{8}\.[^.]+$/i;
+const TRACE_BODY_LIMIT_BYTES = 8 * 1024;
+const sensitiveField =
+	/authorization|cookie|token|password|secret|api[-_]?key/i;
+const contentField = /content|text|prompt|message|output|input|reasoning/i;
+
+function summarizeTraceValue(value: unknown): unknown {
+	if (value === null || typeof value === "boolean" || typeof value === "number")
+		return value;
+	if (typeof value === "string") return { stringLength: value.length };
+	if (Array.isArray(value))
+		return {
+			arrayLength: value.length,
+			items: value.slice(0, 10).map(summarizeTraceValue),
+		};
+	if (!value || typeof value !== "object") return typeof value;
+	return Object.fromEntries(
+		Object.entries(value as Record<string, unknown>).map(([key, item]) => [
+			key,
+			sensitiveField.test(key)
+				? "<redacted>"
+				: contentField.test(key) && typeof item === "string"
+					? { stringLength: item.length }
+					: summarizeTraceValue(item),
+		]),
+	);
+}
+
+async function traceJsonBody(payload: {
+	headers: Headers;
+	body: ReadableStream<Uint8Array> | null;
+}) {
+	const contentType = payload.headers.get("content-type") ?? "";
+	if (!contentType.includes("application/json") || !payload.body)
+		return { contentType, body: "<not-json>" };
+	const reader = payload.body.getReader();
+	const chunks: Uint8Array[] = [];
+	let length = 0;
+	let truncated = false;
+	try {
+		while (length <= TRACE_BODY_LIMIT_BYTES) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			chunks.push(value);
+			length += value.byteLength;
+		}
+		truncated = length > TRACE_BODY_LIMIT_BYTES;
+	} catch {
+		return { contentType, body: "<unavailable>" };
+	} finally {
+		await reader.cancel().catch(() => {});
+	}
+	if (truncated) return { contentType, bodyBytes: length, truncated: true };
+	const bytes = new Uint8Array(length);
+	let offset = 0;
+	for (const chunk of chunks) {
+		bytes.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+	try {
+		return {
+			contentType,
+			bodyBytes: length,
+			body: summarizeTraceValue(JSON.parse(new TextDecoder().decode(bytes))),
+		};
+	} catch {
+		return { contentType, bodyBytes: length, body: "<invalid-json>" };
+	}
+}
+
+function traceRequestHeaders(headers: Headers) {
+	return {
+		contentType: headers.get("content-type") ?? null,
+		hasAuthorization: headers.has("authorization"),
+		hasCookie: headers.has("cookie"),
+		hasApiKey: headers.has("x-api-key"),
+	};
+}
 
 function fileForPath(directory: string, pathname: string) {
 	let relativePath: string;
@@ -111,13 +192,31 @@ await seedDevUser();
 await chatV2Repository.reconcileRunningGenerations();
 
 const app = new Hono();
+const openWebUiGateway = new OpenWebUiSocketGateway();
+const socketIo = new SocketIoServer();
+const socketEngine = new SocketEngine({ path: "/ws/socket.io/" });
+socketIo.bind(socketEngine);
+openWebUiGateway.bind(socketIo);
+const socketEngineHandler = socketEngine.handler();
+const openWebUiRoutes = createOpenWebUiRoutes(openWebUiGateway);
 
 app.use("*", async (c, next) => {
 	const requestId = c.req.header("x-request-id") ?? crypto.randomUUID();
 	const startedAt = performance.now();
 	c.header("x-request-id", requestId);
 	try {
+		const requestTrace = await traceJsonBody(c.req.raw.clone());
+		logger
+			.withMetadata({
+				requestId,
+				method: c.req.method,
+				path: c.req.path,
+				requestHeaders: traceRequestHeaders(c.req.raw.headers),
+				request: requestTrace,
+			})
+			.trace("request received");
 		await next();
+		const responseTrace = await traceJsonBody(c.res.clone());
 		logger
 			.withMetadata({
 				requestId,
@@ -125,6 +224,8 @@ app.use("*", async (c, next) => {
 				path: c.req.path,
 				status: c.res.status,
 				durationMs: Math.round(performance.now() - startedAt),
+				responseHeaders: traceRequestHeaders(c.res.headers),
+				response: responseTrace,
 			})
 			.debug("request completed");
 	} catch (error) {
@@ -183,6 +284,7 @@ app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
 // Decoupled chat streaming (SSE) — see chat/generationManager.ts.
 app.route("/api/chat", chatRoutes);
 app.route("/api/attachments", attachmentRoutes);
+app.route("/", openWebUiRoutes);
 
 app.use(
 	"/trpc/*",
@@ -193,19 +295,45 @@ app.use(
 	}),
 );
 
+async function dispatchAppRequest(request: Request): Promise<Response> {
+	const url = new URL(request.url);
+	const metadata = {
+		method: request.method,
+		path: url.pathname,
+		queryKeys: [...new Set(url.searchParams.keys())].sort(),
+	};
+	logger.withMetadata(metadata).info("request dispatched to Hono");
+	const response = await app.fetch(request);
+	logger
+		.withMetadata({
+			...metadata,
+			status: response.status,
+			contentType: response.headers.get("content-type"),
+		})
+		.info("response returned by Hono");
+	return response;
+}
+
 // Bun's fullstack server bundles and serves the React app (with HMR in dev)
 // from the HTML entrypoint. No Vite. More-specific API routes are matched before
 // the "/*" HTML catch-all and delegate to Hono.
 const server = Bun.serve({
 	port: config.port,
+	idleTimeout: socketEngineHandler.idleTimeout,
+	maxRequestBodySize: socketEngineHandler.maxRequestBodySize,
+	websocket: socketEngineHandler.websocket,
 	routes: {
-		"/trpc/*": (req) => app.fetch(req),
-		"/api/auth/*": (req) => app.fetch(req),
-		"/api/chat/*": (req) => app.fetch(req),
-		"/api/chat": (req) => app.fetch(req),
-		"/api/attachments/*": (req) => app.fetch(req),
-		"/api/attachments": (req) => app.fetch(req),
-		"/healthz": (req) => app.fetch(req),
+		"/ws/socket.io/*": (req, server) => socketEngine.handleRequest(req, server),
+		"/ws/socket.io": (req, server) => socketEngine.handleRequest(req, server),
+		"/trpc/*": dispatchAppRequest,
+		"/api/auth/*": dispatchAppRequest,
+		"/api/chat/*": dispatchAppRequest,
+		"/api/chat": dispatchAppRequest,
+		"/api/attachments/*": dispatchAppRequest,
+		"/api/attachments": dispatchAppRequest,
+		"/api/*": dispatchAppRequest,
+		"/health": dispatchAppRequest,
+		"/healthz": dispatchAppRequest,
 		"/manifest.webmanifest": isProduction
 			? serveProductionWeb
 			: serveDevelopmentPublicFile,
@@ -222,11 +350,20 @@ const server = Bun.serve({
 logger
 	.withMetadata({ url: server.url.toString() })
 	.info("solar server listening");
+logger
+	.withMetadata({
+		logLevel: getLogLevel(),
+		openWebUiTracing: true,
+	})
+	.info("server logging configured");
 
 // Graceful shutdown (Bun exits immediately on SIGTERM by default, dropping
 // in-flight requests). Stop accepting connections, drain, close the DB, exit.
 const shutdown = async (signal: string) => {
 	logger.withMetadata({ signal }).info("solar server shutting down");
+	openWebUiGateway.close();
+	socketIo.close();
+	socketEngine.close();
 	await server.stop();
 	sqlite.close();
 	process.exit(0);

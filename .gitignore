@@ -1,4 +1,5 @@
 .env
+.env.openwebui.local
 .staging-history.json
 .staging-history/
 

@@ -1,7 +1,12 @@
 import { beforeEach, describe, expect, mock, test } from "bun:test";
 
 const providerCallInserts: Array<Record<string, unknown>> = [];
-const persisted: Array<{ steps: unknown[]; parts: unknown; status: string; text: string }> = [];
+const persisted: Array<{
+	steps: unknown[];
+	parts: unknown;
+	status: string;
+	text: string;
+}> = [];
 let streamFactory: (...args: any[]) => AsyncIterable<any>;
 let titleFactory: (...args: any[]) => Promise<string>;
 let persistStarted: Promise<void> | null = null;
@@ -96,7 +101,9 @@ async function persistCall(result: {
 function start(
 	manager: InstanceType<typeof GenerationManager>,
 	messageId = "message-1",
-	overrides: Partial<Parameters<InstanceType<typeof GenerationManager>["start"]>[0]> = {},
+	overrides: Partial<
+		Parameters<InstanceType<typeof GenerationManager>["start"]>[0]
+	> = {},
 ): void {
 	manager.start({
 		conversationId: "conversation-1",
@@ -233,6 +240,41 @@ describe("GenerationManager SSE lifecycle", () => {
 			},
 			{ data: "[DONE]" },
 		]);
+	});
+
+	test("replays buffered chunks to a non-SSE subscriber", async () => {
+		streamFactory = () =>
+			events({ type: "text_delta", delta: "Hello" }, doneEvent);
+		const manager = new GenerationManager();
+		start(manager);
+
+		const initial: Array<{ id: number; chunk: unknown }> = [];
+		await new Promise<void>((resolve) => {
+			manager.subscribeChunks("message-1", 0, {
+				chunk: (bufferedChunk) => initial.push(bufferedChunk),
+				end: resolve,
+			});
+		});
+		expect(initial).toEqual([
+			{ id: 1, chunk: { type: "start", messageId: "message-1" } },
+			{ id: 2, chunk: { type: "text-delta", textDelta: "Hello" } },
+			{
+				id: 3,
+				chunk: {
+					type: "finish",
+					finishReason: "stop",
+					usage: { inputTokens: 3, outputTokens: 5 },
+				},
+			},
+		]);
+
+		const replayed: Array<{ id: number; chunk: unknown }> = [];
+		expect(
+			manager.replayChunks("message-1", 1, (bufferedChunk) =>
+				replayed.push(bufferedChunk),
+			),
+		).toBe(true);
+		expect(replayed.map(({ id }) => id)).toEqual([2, 3]);
 	});
 
 	test("does not publish completion before the response is persisted", async () => {
@@ -523,9 +565,7 @@ describe("GenerationManager SSE lifecycle", () => {
 				cacheWriteTokens: 2,
 			}),
 		]);
-		expect(persisted).toEqual([
-			expect.objectContaining({ status: "error" }),
-		]);
+		expect(persisted).toEqual([expect.objectContaining({ status: "error" })]);
 	});
 
 	test("compacts and retries exactly once after safe overflow before output", async () => {

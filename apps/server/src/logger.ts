@@ -5,6 +5,7 @@ const LOG_LEVELS = ["trace", "debug", "info", "warn", "error"] as const;
 export type SolarLogLevel = (typeof LOG_LEVELS)[number];
 
 function initialLevel(): SolarLogLevel {
+	if (process.env.SOLAR_SEED_DEV_USER === "1") return "trace";
 	const value = process.env.SOLAR_LOG_LEVEL;
 	if (value && LOG_LEVELS.includes(value as SolarLogLevel))
 		return value as SolarLogLevel;

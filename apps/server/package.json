@@ -19,6 +19,7 @@
     "@earendil-works/pi-ai": "0.80.10",
     "@hono/trpc-server": "^0.3.4",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@socket.io/bun-engine": "^0.1.1",
     "@solar/shared": "workspace:*",
     "@solar/web": "workspace:*",
     "@struktoai/mirage-node": "^0.0.3",
@@ -34,6 +35,7 @@
     "mathjs": "^15.2.0",
     "openjsxl": "^1.0.0",
     "serialize-error": "^13.0.1",
+    "socket.io": "^4.8.3",
     "tldts": "^7.4.9",
     "unpdf": "^1.6.2",
     "yaml": "^2.8.2",
@@ -41,6 +43,7 @@
   },
   "devDependencies": {
     "better-sqlite3": "^12.11.1",
-    "kysely-codegen": "^0.17.0"
+    "kysely-codegen": "^0.17.0",
+    "socket.io-client": "^4.8.3"
   }
 }

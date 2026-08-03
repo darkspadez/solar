@@ -55,7 +55,7 @@ async function recordProviderCallTelemetry(input: {
 		.execute();
 }
 
-interface BufferedChunk {
+export interface BufferedChunk {
 	id: number;
 	chunk: UiChunk;
 }
@@ -63,6 +63,11 @@ interface BufferedChunk {
 interface Subscriber {
 	push: (bc: BufferedChunk) => void;
 	heartbeat: () => void;
+	end: () => void;
+}
+
+export interface GenerationChunkSubscriber {
+	chunk: (bufferedChunk: BufferedChunk) => void;
 	end: () => void;
 }
 
@@ -298,6 +303,47 @@ export class GenerationManager {
 				if (gen && subscriber) gen.subscribers.delete(subscriber);
 			},
 		});
+	}
+
+	/** Subscribes a non-SSE transport to the buffered/live generation stream. */
+	subscribeChunks(
+		messageId: string,
+		lastEventId: number,
+		subscriber: GenerationChunkSubscriber,
+	): () => void {
+		const gen = this.generations.get(messageId);
+		if (!gen) {
+			subscriber.end();
+			return () => {};
+		}
+		for (const bufferedChunk of gen.chunks) {
+			if (bufferedChunk.id > lastEventId) subscriber.chunk(bufferedChunk);
+		}
+		if (gen.status !== "running") {
+			subscriber.end();
+			return () => {};
+		}
+		const internal: Subscriber = {
+			push: subscriber.chunk,
+			heartbeat: () => {},
+			end: subscriber.end,
+		};
+		gen.subscribers.add(internal);
+		return () => gen.subscribers.delete(internal);
+	}
+
+	/** Replays retained chunks without creating a second live subscription. */
+	replayChunks(
+		messageId: string,
+		lastEventId: number,
+		onChunk: (bufferedChunk: BufferedChunk) => void,
+	): boolean {
+		const gen = this.generations.get(messageId);
+		if (!gen) return false;
+		for (const bufferedChunk of gen.chunks) {
+			if (bufferedChunk.id > lastEventId) onChunk(bufferedChunk);
+		}
+		return true;
 	}
 
 	private async run(
