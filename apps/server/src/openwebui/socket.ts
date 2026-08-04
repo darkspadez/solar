@@ -158,10 +158,11 @@ export class OpenWebUiSocketGateway {
 			},
 		);
 		socket.on("heartbeat", () => {});
-		socket.on("disconnect", () => {
+		socket.on("disconnect", (reason) => {
 			traceSocket("socket disconnected", {
 				socketId: socket.id,
 				userId: this.socketUsers.get(socket.id)?.id,
+				reason,
 			});
 			this.socketUsers.delete(socket.id);
 			for (const task of this.tasks.values()) task.socketIds.delete(socket.id);
