@@ -16,9 +16,19 @@ import {
 	signInOpenWebUi,
 	type OpenWebUiPrincipal,
 } from "./auth";
+import {
+	deleteOpenWebUiOrphan,
+	openWebUiFileResponse,
+	parseOpenWebUiMetadata,
+	processStatusSse,
+	readOpenWebUiAttachment,
+	resolveCompletionAttachmentIds,
+	saveOpenWebUiUpload,
+} from "./files";
 import { OpenWebUiSocketGateway } from "./socket";
 
 const MCP_ID_PREFIX = "server:mcp:";
+const OPEN_WEB_UI_MAX_FILE_COUNT = 6;
 
 function traceFacade(event: string, metadata: Record<string, unknown>) {
 	const entry = logger.withMetadata({ component: "openwebui", ...metadata });
@@ -42,6 +52,49 @@ function openWebUiUser(user: OpenWebUiPrincipal) {
 		email: user.email,
 		role: user.role,
 		profile_image_url: "/user.png",
+	};
+}
+
+const OPEN_WEB_UI_FILE_PAGE_SIZE = 50;
+
+function pageOffset(page: number): number {
+	return (page - 1) * OPEN_WEB_UI_FILE_PAGE_SIZE;
+}
+
+function filenameMatches(filename: string, pattern: string): boolean {
+	const escaped = pattern
+		.trim()
+		.replace(/[.+^${}()|[\]\\]/g, "\\$&")
+		.replace(/\*/g, ".*")
+		.replace(/\?/g, ".");
+	try {
+		return new RegExp(`^${escaped}$`, "i").test(filename);
+	} catch {
+		return false;
+	}
+}
+
+function fileContentHeaders(
+	attachment: {
+		filename: string;
+		mimeType: string;
+		byteSize: number;
+		kind: string;
+	},
+	forceDownload = false,
+) {
+	const disposition =
+		!forceDownload &&
+		((attachment.kind === "image" && attachment.mimeType !== "image/svg+xml") ||
+			attachment.mimeType === "application/pdf")
+			? "inline"
+			: "attachment";
+	return {
+		"cache-control": "private, no-store",
+		"content-length": String(attachment.byteSize),
+		"content-type": attachment.mimeType,
+		"content-disposition": `${disposition}; filename*=UTF-8''${encodeURIComponent(attachment.filename)}`,
+		"x-content-type-options": "nosniff",
 	};
 }
 
@@ -222,7 +275,13 @@ export function createOpenWebUiRoutes(gateway: OpenWebUiSocketGateway) {
 			},
 			default_models: models.map((model) => model.modelId),
 			audio: { stt: false, tts: false },
-			file: { max_count: 0, max_size: 0 },
+			// Keep this aligned with Chat V2's attachment limits. Open Relay and
+			// Conduit use these values to decide whether to show the composer
+			// upload affordance and to validate selected files.
+			file: {
+				max_count: OPEN_WEB_UI_MAX_FILE_COUNT,
+				max_size: 20,
+			},
 			permissions: { chat: { controls: true } },
 			...(user ? { user: openWebUiUser(user) } : {}),
 		});
@@ -432,6 +491,229 @@ export function createOpenWebUiRoutes(gateway: OpenWebUiSocketGateway) {
 		const user = await requireUser(c);
 		if (user instanceof Response) return user;
 		return c.json((await authorizedMcpServers(user.id)).map(toolServerDto));
+	});
+
+	// Open WebUI's file API is the shared upload and retrieval surface used by
+	// both Conduit and Open Relay. Files are stored in Solar's existing
+	// attachment tables; these routes only translate the wire DTOs.
+	const listFiles = async (c: Context) => {
+		const user = await requireUser(c);
+		if (user instanceof Response) return user;
+		const page = normalizedPage(c.req.query("page"));
+		const attachments = await chatV2Repository.listAttachments(user.id);
+		const items = attachments
+			.slice(pageOffset(page), pageOffset(page) + OPEN_WEB_UI_FILE_PAGE_SIZE)
+			.map((attachment) => openWebUiFileResponse(attachment));
+		return c.json({ items, total: attachments.length });
+	};
+
+	routes.get("/api/v1/files/", listFiles);
+	routes.get("/api/v1/files", listFiles);
+
+	routes.get("/api/v1/files/search", async (c) => {
+		const user = await requireUser(c);
+		if (user instanceof Response) return user;
+		const pattern = c.req.query("filename")?.trim() ?? "";
+		if (!pattern) return c.json({ detail: "filename is required" }, 400);
+		const skip = Math.max(0, Number(c.req.query("skip") ?? 0) || 0);
+		const requestedLimit = Number(c.req.query("limit") ?? 100) || 100;
+		const limit = Math.min(1000, Math.max(1, requestedLimit));
+		const matches = (await chatV2Repository.listAttachments(user.id)).filter(
+			(attachment) => filenameMatches(attachment.filename, pattern),
+		);
+		if (matches.length === 0)
+			return c.json({ detail: "No files found matching the pattern." }, 404);
+		return c.json(
+			matches
+				.slice(skip, skip + limit)
+				.map((attachment) => openWebUiFileResponse(attachment)),
+		);
+	});
+
+	routes.get("/api/v1/files/count", async (c) => {
+		const user = await requireUser(c);
+		if (user instanceof Response) return user;
+		return c.json((await chatV2Repository.listAttachments(user.id)).length);
+	});
+
+	routes.post("/api/v1/retrieval/process/files/batch", async (c) => {
+		const user = await requireUser(c);
+		if (user instanceof Response) return user;
+		const body = await parseBody(c);
+		// Open WebUI and Conduit send the uploaded file objects. Open Relay's
+		// workspace client also has a compact form that sends only `file_ids`.
+		// Accept either shape while keeping the same per-file ownership check.
+		const fileObjects = Array.isArray(body.files) ? body.files : [];
+		const fileIds = Array.isArray(body.file_ids) ? body.file_ids : [];
+		const rawFiles = fileObjects.length > 0 ? fileObjects : fileIds;
+		const results: Array<Record<string, unknown>> = [];
+		const errors: Array<Record<string, unknown>> = [];
+		for (const rawFile of rawFiles) {
+			if (typeof rawFile === "string") {
+				try {
+					await chatV2Repository.getAttachment(user.id, rawFile);
+					results.push({ file_id: rawFile, status: "completed" });
+				} catch {
+					errors.push({
+						file_id: rawFile,
+						status: "failed",
+						error: "File not found",
+					});
+				}
+				continue;
+			}
+			if (!rawFile || typeof rawFile !== "object" || Array.isArray(rawFile)) {
+				errors.push({
+					file_id: null,
+					status: "failed",
+					error: "Invalid file object",
+				});
+				continue;
+			}
+			const file = rawFile as Record<string, unknown>;
+			const fileId =
+				typeof file.id === "string"
+					? file.id
+					: typeof file.file_id === "string"
+						? file.file_id
+						: null;
+			if (!fileId) {
+				errors.push({
+					file_id: null,
+					status: "failed",
+					error: "File object is missing an id",
+				});
+				continue;
+			}
+			try {
+				await chatV2Repository.getAttachment(user.id, fileId);
+				results.push({ file_id: fileId, status: "completed" });
+			} catch {
+				errors.push({
+					file_id: fileId,
+					status: "failed",
+					error: "File not found",
+				});
+			}
+		}
+		return c.json({ results, errors });
+	});
+
+	const uploadFile = async (c: Context) => {
+		const user = await requireUser(c);
+		if (user instanceof Response) return user;
+		try {
+			const body = await c.req.parseBody();
+			const rawFile = body.file;
+			const file = rawFile instanceof File ? rawFile : null;
+			if (!file) return c.json({ detail: "file is required" }, 400);
+			const metadata = parseOpenWebUiMetadata(body.metadata);
+			const result = await saveOpenWebUiUpload(
+				user.id,
+				file,
+				metadata,
+				chatV2Repository,
+			);
+			return c.json(
+				{
+					status: true,
+					...openWebUiFileResponse(result.attachment, result.metadata),
+				},
+				200,
+			);
+		} catch (error) {
+			return c.json(
+				{
+					detail:
+						error instanceof Error ? error.message : "Unable to upload file",
+				},
+				error instanceof Error && error.message.includes("20 MB") ? 413 : 400,
+			);
+		}
+	};
+
+	routes.post("/api/v1/files/", uploadFile);
+	routes.post("/api/v1/files", uploadFile);
+
+	routes.get("/api/v1/files/:id/process/status", async (c) => {
+		const user = await requireUser(c);
+		if (user instanceof Response) return user;
+		try {
+			await chatV2Repository.getAttachment(user.id, c.req.param("id"));
+			if (c.req.query("stream") !== "true")
+				return c.json({ status: "completed" });
+			return processStatusSse();
+		} catch {
+			return c.json({ detail: "File not found" }, 404);
+		}
+	});
+
+	routes.get("/api/v1/files/:id/data/content", async (c) => {
+		const user = await requireUser(c);
+		if (user instanceof Response) return user;
+		try {
+			const { attachment, bytes } = await readOpenWebUiAttachment(
+				user.id,
+				c.req.param("id"),
+				chatV2Repository,
+			);
+			const content =
+				attachment.kind === "text" ? new TextDecoder().decode(bytes) : "";
+			return c.json({ content });
+		} catch {
+			return c.json({ detail: "File not found" }, 404);
+		}
+	});
+
+	routes.get("/api/v1/files/:id/content", async (c) => {
+		const user = await requireUser(c);
+		if (user instanceof Response) return user;
+		try {
+			const { attachment, bytes } = await readOpenWebUiAttachment(
+				user.id,
+				c.req.param("id"),
+				chatV2Repository,
+			);
+			return new Response(bytes as unknown as BodyInit, {
+				headers: fileContentHeaders(
+					attachment,
+					c.req.query("attachment") === "true",
+				),
+			});
+		} catch {
+			return c.json({ detail: "File not found" }, 404);
+		}
+	});
+
+	routes.get("/api/v1/files/:id", async (c) => {
+		const user = await requireUser(c);
+		if (user instanceof Response) return user;
+		try {
+			const attachment = await chatV2Repository.getAttachment(
+				user.id,
+				c.req.param("id"),
+			);
+			return c.json(openWebUiFileResponse(attachment));
+		} catch {
+			return c.json({ detail: "File not found" }, 404);
+		}
+	});
+
+	routes.delete("/api/v1/files/:id", async (c) => {
+		const user = await requireUser(c);
+		if (user instanceof Response) return user;
+		try {
+			const removed = await deleteOpenWebUiOrphan(
+				user.id,
+				c.req.param("id"),
+				chatV2Repository,
+			);
+			if (!removed)
+				return c.json({ detail: "File is attached to a conversation" }, 409);
+			return c.json({ message: "File deleted successfully" });
+		} catch {
+			return c.json({ detail: "File not found" }, 404);
+		}
 	});
 
 	routes.get("/api/v1/folders/", async (c) => {
@@ -696,6 +978,7 @@ export function createOpenWebUiRoutes(gateway: OpenWebUiSocketGateway) {
 			bodyKeys: Object.keys(body).sort(),
 			messageLength: text.length,
 		});
+		let createdInlineIds: string[] = [];
 		try {
 			const requestedChatId =
 				typeof body.chat_id === "string" ? body.chat_id : null;
@@ -722,13 +1005,27 @@ export function createOpenWebUiRoutes(gateway: OpenWebUiSocketGateway) {
 			);
 			await setConversationModel(user, conversationId, selection);
 			await applyToolSelection(user.id, conversationId, body.tool_servers);
-			if (!text.trim())
-				return c.json({ detail: "A user message is required" }, 400);
+			const resolvedAttachments = await resolveCompletionAttachmentIds(
+				user.id,
+				body,
+				chatV2Repository,
+			);
+			createdInlineIds = resolvedAttachments.createdInlineIds;
+			if (resolvedAttachments.attachmentIds.length > OPEN_WEB_UI_MAX_FILE_COUNT)
+				throw new Error(
+					`A message can contain at most ${OPEN_WEB_UI_MAX_FILE_COUNT} files`,
+				);
+			if (!text.trim() && resolvedAttachments.attachmentIds.length === 0)
+				return c.json(
+					{ detail: "A user message or attachment is required" },
+					400,
+				);
 			const messageId = await sendMessage({
 				userId: user.id,
 				isAdmin: user.isAdmin,
 				conversationId,
 				text,
+				attachmentIds: resolvedAttachments.attachmentIds,
 			});
 			gateway.attachTask({
 				userId: user.id,
@@ -749,6 +1046,14 @@ export function createOpenWebUiRoutes(gateway: OpenWebUiSocketGateway) {
 				chat_id: conversationId,
 			});
 		} catch (error) {
+			for (const attachmentId of createdInlineIds) {
+				const removed = await deleteOpenWebUiOrphan(
+					user.id,
+					attachmentId,
+					chatV2Repository,
+				).catch(() => false);
+				if (!removed) continue;
+			}
 			logger
 				.withError(error)
 				.withMetadata({ component: "openwebui", userId: user.id })

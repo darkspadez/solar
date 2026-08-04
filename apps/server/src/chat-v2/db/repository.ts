@@ -721,6 +721,7 @@ export class ChatV2Repository {
 			userTurnId?: string;
 			assistantTurnId?: string;
 			userMessage: CanonicalMessageInput;
+			attachmentIds?: readonly string[];
 		},
 	): Promise<{
 		userTurnId: string;
@@ -729,6 +730,9 @@ export class ChatV2Repository {
 	}> {
 		return this.db.transaction().execute(async (trx) => {
 			await this.requireConversation(trx, userId, conversationId);
+			const attachmentIds = [...new Set(input.attachmentIds ?? [])];
+			for (const attachmentId of attachmentIds)
+				await this.requireAttachment(trx, userId, attachmentId);
 			const maximum = await trx
 				.selectFrom("v2_conversation_turn")
 				.select((eb) => eb.fn.max<number>("ordinal").as("ordinal"))
@@ -767,6 +771,17 @@ export class ChatV2Repository {
 				conversationId,
 				[{ ...input.userMessage, turnId: userTurnId }],
 			);
+			if (attachmentIds.length > 0)
+				await trx
+					.insertInto("v2_message_attachment")
+					.values(
+						attachmentIds.map((attachmentId, ordinal) => ({
+							messageId: userMessage!.id,
+							attachmentId,
+							ordinal,
+						})),
+					)
+					.execute();
 			return { userTurnId, userMessageId: userMessage!.id, assistantTurnId };
 		});
 	}
@@ -1554,28 +1569,52 @@ export class ChatV2Repository {
 		userId: string,
 		attachmentId: string,
 	): Promise<{ removed: boolean; storageKey?: string }> {
-		const attachment = await this.db
-			.selectFrom("v2_attachment")
-			.select(["id", "storageKey"])
-			.where("id", "=", attachmentId)
-			.where("userId", "=", userId)
-			.executeTakeFirst();
-		if (!attachment) return { removed: false };
-		const binding = await this.db
-			.selectFrom("v2_message_attachment")
-			.select("attachmentId")
-			.where("attachmentId", "=", attachmentId)
-			.executeTakeFirst();
-		if (binding) return { removed: false };
-		await this.db
-			.deleteFrom("v2_attachment")
-			.where("id", "=", attachmentId)
-			.execute();
-		return { removed: true, storageKey: attachment.storageKey };
+		return this.db.transaction().execute(async (trx) => {
+			const attachment = await trx
+				.selectFrom("v2_attachment")
+				.select(["id", "storageKey"])
+				.where("id", "=", attachmentId)
+				.where("userId", "=", userId)
+				.executeTakeFirst();
+			if (!attachment) return { removed: false };
+
+			// Keep the orphan check in the same conditional DELETE as the row
+			// removal. A concurrent completion can therefore either bind first
+			// (and make this delete a no-op) or lose the race before binding
+			// validates its attachment, but it cannot bind after a successful
+			// check and then have its binding silently cascaded away.
+			const deleted = await trx
+				.deleteFrom("v2_attachment")
+				.where("id", "=", attachmentId)
+				.where("userId", "=", userId)
+				.where((eb) =>
+					eb.not(
+						eb.exists(
+							eb
+								.selectFrom("v2_message_attachment")
+								.select("attachmentId")
+								.where("attachmentId", "=", attachmentId),
+						),
+					),
+				)
+				.executeTakeFirst();
+			return (deleted.numDeletedRows ?? 0n) > 0n
+				? { removed: true, storageKey: attachment.storageKey }
+				: { removed: false };
+		});
 	}
 
 	async getAttachment(userId: string, attachmentId: string) {
 		return this.requireAttachment(this.db, userId, attachmentId);
+	}
+
+	async listAttachments(userId: string): Promise<AttachmentRecord[]> {
+		return this.db
+			.selectFrom("v2_attachment")
+			.selectAll()
+			.where("userId", "=", userId)
+			.orderBy("createdAt", "desc")
+			.execute();
 	}
 
 	async getCompaction(userId: string, compactionId: string) {

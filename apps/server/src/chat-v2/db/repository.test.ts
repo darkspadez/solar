@@ -360,14 +360,8 @@ describe("chat-v2 database", () => {
 				origin: "text",
 				status: "complete",
 			},
+			attachmentIds: ["attachment-1"],
 		});
-		await repository.bindAttachment(
-			USER_A,
-			conversation.id,
-			started.userMessageId,
-			"attachment-1",
-			0,
-		);
 
 		expect(started).toEqual({
 			userTurnId: "user-turn",

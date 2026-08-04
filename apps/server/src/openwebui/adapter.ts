@@ -2,6 +2,7 @@ import type { ModelDescriptor, ModelSelection } from "../chat/catalog";
 import { listAvailableModels, resolveSelection } from "../chat/catalog";
 import { loadMessages } from "../chat/v2Live";
 import type { ChatV2Repository } from "../chat-v2/db/repository";
+import { openWebUiAttachmentDescriptor } from "./files";
 
 export interface OpenWebUiChatSummary {
 	id: string;
@@ -78,10 +79,25 @@ export async function chatResponse(
 	const conversation = await repository.getConversation(userId, conversationId);
 	const turns = await loadMessages(userId, conversationId);
 	const messages: Record<string, Record<string, unknown>> = {};
+	const chatFiles = new Map<string, Record<string, unknown>>();
 	for (const [index, turn] of turns.entries()) {
 		const parentId = index > 0 ? turns[index - 1]!.id : null;
 		const childrenIds = turns[index + 1] ? [turns[index + 1]!.id] : [];
 		const persisted = parseParts(turn.parts);
+		const files = turn.attachments.map((attachment) => {
+			const descriptor = openWebUiAttachmentDescriptor({
+				...attachment,
+				userId,
+				storageKey: "",
+				sha256: "",
+				width: null,
+				height: null,
+				pageCount: null,
+				createdAt: turn.createdAt,
+			});
+			chatFiles.set(attachment.id, descriptor);
+			return descriptor;
+		});
 		const message: Record<string, unknown> = {
 			id: turn.id,
 			parentId,
@@ -92,6 +108,10 @@ export async function chatResponse(
 			models: modelIds(conversation),
 			done: !turn.isActive,
 		};
+		if (files.length) {
+			message.files = files;
+			message.attachment_ids = files.map((file) => file.id);
+		}
 		if (persisted?.usage) message.usage = persisted.usage;
 		if (turn.reasoning) message.reasoning_content = turn.reasoning;
 		if (turn.toolCalls.length) {
@@ -128,7 +148,7 @@ export async function chatResponse(
 			history,
 			messages,
 			tags,
-			files: [],
+			files: [...chatFiles.values()],
 			timestamp: unixSeconds(conversation.createdAt),
 		},
 		created_at: unixSeconds(conversation.createdAt),

@@ -52,7 +52,6 @@ import { CompactionService } from "../chat-v2/compaction";
 import { createV2Summarizer } from "../chat-v2/summarizer";
 import { projectVisibleTurns, type VisibleTurn } from "../chat-v2/projection";
 import { zeroUsage } from "../chat-v2/validation";
-import { AttachmentService } from "../chat-v2/attachments";
 import { logger } from "../logger";
 
 export const chatV2Repository = new ChatV2Repository(db);
@@ -294,26 +293,18 @@ export async function sendMessage(input: SendMessageInput): Promise<string> {
 		? withSkillInvocation(rawMessage, invocation)
 		: rawMessage;
 
-	const attachments = new AttachmentService(chatV2Repository);
-	for (const attachmentId of input.attachmentIds ?? [])
-		await chatV2Repository.getAttachment(input.userId, attachmentId);
-
-	const { userTurnId, userMessageId, assistantTurnId } =
-		await chatV2Repository.startUserTurn(input.userId, input.conversationId, {
+	const { assistantTurnId } = await chatV2Repository.startUserTurn(
+		input.userId,
+		input.conversationId,
+		{
 			userMessage: {
 				message: userMessage,
 				origin: "text",
 				status: "complete",
 			},
-		});
-	for (const [ordinal, attachmentId] of (input.attachmentIds ?? []).entries())
-		await attachments.bind(
-			input.userId,
-			input.conversationId,
-			userMessageId,
-			attachmentId,
-			ordinal,
-		);
+			attachmentIds: input.attachmentIds,
+		},
+	);
 
 	await startAssistantTurn({
 		userId: input.userId,
@@ -825,12 +816,15 @@ export async function loadMessages(userId: string, conversationId: string) {
 			...displayNames.get(call.name),
 		})),
 		skillInvocation: null,
-		attachments: turn.attachments.map(({ id, filename, mimeType, kind }) => ({
-			id,
-			filename,
-			mimeType,
-			kind: kind as "image" | "text" | "document",
-		})),
+		attachments: turn.attachments.map(
+			({ id, filename, mimeType, kind, byteSize }) => ({
+				id,
+				filename,
+				mimeType,
+				kind: kind as "image" | "text" | "document",
+				byteSize,
+			}),
+		),
 		isActive: turn.status === "pending" && generationManager.isActive(turn.id),
 	}));
 }

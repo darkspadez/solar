@@ -34,6 +34,15 @@ tool_servers
 `apps/server/src/openwebui/routes.ts` accepts both the Open WebUI 0.9+
 `user_message` shape and Conduit's legacy `parent_message` shape.
 
+Core image/file upload compatibility is now implemented for the reviewed
+Conduit and Open Relay clients. The facade accepts multipart `file` uploads at
+`/api/v1/files/`, returns both the nested Open WebUI metadata shape and the
+flat fields older clients decode, and serves raw bytes from
+`/api/v1/files/:id/content`. Conduit's attachment IDs/descriptors and inline
+image data URLs, plus Open Relay's current-message `user_message.files`, are
+resolved into user-owned Chat V2 attachments. Historical top-level Open Relay
+RAG files are deliberately not rebound to follow-up turns.
+
 ## Main implementation files
 
 - `apps/server/src/openwebui/auth.ts` — Bearer Solar API-key/session resolution
@@ -41,6 +50,8 @@ tool_servers
 - `apps/server/src/openwebui/adapter.ts` — Solar model/conversation/history DTO
   translation.
 - `apps/server/src/openwebui/routes.ts` — REST compatibility routes.
+- `apps/server/src/openwebui/files.ts` — file DTOs, upload/content handling,
+  attachment reference resolution, and processing-status compatibility.
 - `apps/server/src/openwebui/events.ts` — `UiChunk` to Open WebUI completion
   payload mapping.
 - `apps/server/src/openwebui/socket.ts` — authenticated Socket.IO task gateway.
@@ -60,14 +71,16 @@ SOLAR_MOCK_LLM=1 bun run typecheck
 Focused facade tests are colocated under `apps/server/src/openwebui/`:
 
 - `routes.test.ts` includes the observed Conduit legacy task request.
+- `files.test.ts` covers multipart upload, MIME normalization, ownership,
+  content retrieval, processing status, batch forms, inline images, and
+  completion attachment binding.
 - `socket.test.ts` asserts `start → text → finish` Socket.IO events.
 - `socket-engine.test.ts` validates Bun Engine.IO integration.
 - `reference-contract.test.ts` runs guarded staging checks when
   `.env.openwebui.local` is loaded.
 
-The last full server run before the facade commit passed: 198 tests passed,
-8 skipped, 0 failed. The focused Conduit contract tests and typecheck also
-passed after the legacy `parent_message` fix.
+The current full server run passes: 208 tests passed, 8 skipped, 0 failed.
+The focused upload tests and typecheck also pass.
 
 ## Local logs
 
@@ -108,9 +121,13 @@ socket task stream ended
 2. Validate conversation-level MCP enable/disable and tool lifecycle rendering
    in Conduit.
 3. Validate Open Relay against the same facade.
-4. Consider inert compatibility responses for Conduit’s noncritical probes that
+4. Decide whether full Open WebUI workspace/knowledge behavior is needed:
+   arbitrary upload metadata is not persisted, processing/batch endpoints are
+   compatibility acknowledgements rather than embedding jobs, and
+   `/data/content` returns extracted text only for plain-text attachments.
+5. Consider inert compatibility responses for Conduit’s noncritical probes that
    currently return `404`, including archived chats, notes, user settings, and
    model profile images. They did not block the successful send flow.
-5. Decide whether facade sign-in should reuse a managed API key rather than
+6. Decide whether facade sign-in should reuse a managed API key rather than
    creating a Solar API key on every sign-in.
-6. Before a PR, rerun the full mock-LLM server suite plus typecheck.
+7. Before a PR, rerun the full mock-LLM server suite plus typecheck.

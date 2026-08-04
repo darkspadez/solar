@@ -58,6 +58,25 @@ mock.module("../chat/v2Live", () => ({
 	},
 	stopGeneration: async () => true,
 }));
+mock.module("../chat/attachments", () => ({
+	AttachmentError: class AttachmentError extends Error {},
+	deleteAttachmentFilesByStorageKey: async () => {},
+	readAttachmentBytes: async () => new Uint8Array(),
+	saveAttachmentFile: async () => ({
+		id: "attachment",
+		userId: USER_ID,
+		storageKey: "attachment",
+		filename: "attachment.txt",
+		mimeType: "text/plain",
+		kind: "text",
+		byteSize: 0,
+		sha256: "",
+		width: null,
+		height: null,
+		pageCount: null,
+		createdAt: new Date().toISOString(),
+	}),
+}));
 
 const { createOpenWebUiRoutes } = await import("./routes");
 

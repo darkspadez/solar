@@ -13,6 +13,8 @@ The initial product requirement is deliberately narrow:
 2. Enable and disable Solar tools.
 3. List, open, and continue existing chats.
 4. Delete chats.
+5. Upload user-owned images and supported text/document files, retrieve their
+   content, and send them as current-turn attachments.
 
 The facade is server-side only. It must not become a second canonical chat
 implementation.
@@ -22,7 +24,8 @@ implementation.
 - Forking, patching, or redistributing either client.
 - Direct-provider mode.
 - Open WebUI channels, knowledge bases, terminal, audio, image generation,
-  automations, admin workspace APIs, or other optional features.
+  automations, admin workspace APIs, full workspace file management, or other
+  optional features.
 - Full branching/version semantics for message trees.
 - A generic Open WebUI server implementation independent of Solar.
 
@@ -96,6 +99,21 @@ The server now exposes the initial facade at the shared Open WebUI paths:
 
 The prototype intentionally keeps Open WebUI pinned/shared/admin configuration,
 folder nesting, and unsupported workspace features disabled or unimplemented.
+
+It now also exposes the core file surface used by Conduit and Open Relay:
+
+- multipart upload at `/api/v1/files/`;
+- user-scoped list, search, count, metadata, raw-content, and delete routes;
+- processing-status and batch-processing compatibility responses;
+- current-turn attachment resolution for uploaded IDs, file descriptors, content
+  URLs, and inline image data URLs.
+
+Uploaded files are stored in Solar's existing Chat V2 attachment tables and
+storage. The completion path binds them to the canonical user message in the
+same transaction that creates the user and assistant turns, so attachment
+ownership and chat history remain Solar invariants. Solar performs supported
+document expansion when generation starts; the facade does not create a
+separate Open WebUI retrieval or knowledge-base persistence layer.
 
 ## Generation and Socket.IO design
 
@@ -219,6 +237,36 @@ direct Solar ID reuse and synthesized single-branch history are insufficient for
 the required workflows, treat the facade experiment as non-viable rather than
 introducing a second persistence model.
 
+### Attachments and files
+
+Conduit and Open Relay share the Open WebUI file API but differ in how they
+reference files during completion:
+
+- Conduit sends `attachment_ids`, file descriptors, and sometimes
+  `/api/v1/files/:id/content` references. It may also send inline
+  `image_url` data URLs.
+- Open Relay sends current-turn files in `user_message.files`, retains prior
+  files in top-level `files` for retrieval/history, and uploads images with
+  `process=false` while polling document uploads with
+  `/process/status?stream=true`.
+
+The facade accepts both conventions, scopes every file lookup to the bearer
+principal, and intentionally binds only current-turn references. Historical
+top-level Open Relay files are not rebound to every follow-up user message;
+Solar's persisted message bindings remain the source of truth for prior turns.
+
+The supported upload limit is six files per message and 20 MB per file, matching
+the advertised `/api/config` values and Solar's attachment storage limit.
+Content is served as raw bytes with the stored MIME type. SVG is forced to a
+download disposition, while ordinary images and PDFs may be displayed inline.
+
+This is core chat compatibility, not full Open WebUI workspace support.
+Arbitrary multipart metadata is returned on the upload response but is not yet
+persisted in the Chat V2 attachment schema. Processing and batch routes validate
+ownership and acknowledge completion; they do not build embeddings or
+knowledge-base collections. Binary document text extraction through
+`/data/content` and broader workspace routes remain follow-up work.
+
 Conversation operations map to existing repository behavior:
 
 - create → `createConversation`/`startUserTurn` path
@@ -286,6 +334,8 @@ configuration, and displays Solar models.
 
 - Implement create, list, open, update/rename, folder assignment, and delete.
 - Serialize Solar conversations into the Open WebUI chat DTO/tree shape.
+- Persist and project current-turn image/file attachments through the shared
+  Open WebUI file descriptors.
 - Support pagination/filter parameters required by the target clients.
 - Verify ownership and prevent cross-user ID access.
 - Add continuation tests proving a new response uses persisted Solar history.
@@ -362,9 +412,10 @@ Required test groups:
    workflow.
 5. **Generation replay:** current buffers are single-node and in-memory. A
    durable event log is outside the first facade release.
-6. **Attachments:** exclude file upload/content compatibility initially unless
-   the selected client's basic chat flow requires it; advertise the capability
-   as disabled otherwise.
+6. **Attachments:** the core upload/content contract is now implemented for
+   Conduit and Open Relay. Full Open WebUI processing, metadata persistence,
+   knowledge-base association, and workspace file editing remain outside this
+   release.
 
 ## Definition of done
 
@@ -373,6 +424,8 @@ Required test groups:
 - A stock client can create and stream a chat response.
 - The response is persisted in Solar and visible after reconnect/device change.
 - Existing chats can be listed, opened, continued, foldered, and deleted.
+- Conduit and Open Relay can upload supported images/files, retrieve them, and
+  send current-turn attachments through the Solar Chat V2 path.
 - Solar MCP tools can be enabled/disabled per conversation and their calls are
   rendered by the client.
 - Unsupported Open WebUI features are not exposed.
