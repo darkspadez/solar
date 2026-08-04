@@ -18,6 +18,7 @@ import { createContext } from "./trpc/context";
 import { appRouter } from "./trpc/router";
 import { createOpenWebUiRoutes } from "./openwebui/routes";
 import { OpenWebUiSocketGateway } from "./openwebui/socket";
+import { traceJsonBody } from "./requestTracing";
 
 const isProduction = process.env.NODE_ENV === "production";
 // Production serves the bundled web assets.
@@ -33,74 +34,6 @@ const webDirectory = path.join(
 const webPublicDirectory = path.resolve(import.meta.dir, "../../web/public");
 const webIndex = Bun.file(path.join(webDirectory, "index.html"));
 const hashedAssetName = /-[a-z0-9]{8}\.[^.]+$/i;
-const TRACE_BODY_LIMIT_BYTES = 8 * 1024;
-const sensitiveField =
-	/authorization|cookie|token|password|secret|api[-_]?key/i;
-const contentField = /content|text|prompt|message|output|input|reasoning/i;
-
-function summarizeTraceValue(value: unknown): unknown {
-	if (value === null || typeof value === "boolean" || typeof value === "number")
-		return value;
-	if (typeof value === "string") return { stringLength: value.length };
-	if (Array.isArray(value))
-		return {
-			arrayLength: value.length,
-			items: value.slice(0, 10).map(summarizeTraceValue),
-		};
-	if (!value || typeof value !== "object") return typeof value;
-	return Object.fromEntries(
-		Object.entries(value as Record<string, unknown>).map(([key, item]) => [
-			key,
-			sensitiveField.test(key)
-				? "<redacted>"
-				: contentField.test(key) && typeof item === "string"
-					? { stringLength: item.length }
-					: summarizeTraceValue(item),
-		]),
-	);
-}
-
-async function traceJsonBody(payload: {
-	headers: Headers;
-	body: ReadableStream<Uint8Array> | null;
-}) {
-	const contentType = payload.headers.get("content-type") ?? "";
-	if (!contentType.includes("application/json") || !payload.body)
-		return { contentType, body: "<not-json>" };
-	const reader = payload.body.getReader();
-	const chunks: Uint8Array[] = [];
-	let length = 0;
-	let truncated = false;
-	try {
-		while (length <= TRACE_BODY_LIMIT_BYTES) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			chunks.push(value);
-			length += value.byteLength;
-		}
-		truncated = length > TRACE_BODY_LIMIT_BYTES;
-	} catch {
-		return { contentType, body: "<unavailable>" };
-	} finally {
-		await reader.cancel().catch(() => {});
-	}
-	if (truncated) return { contentType, bodyBytes: length, truncated: true };
-	const bytes = new Uint8Array(length);
-	let offset = 0;
-	for (const chunk of chunks) {
-		bytes.set(chunk, offset);
-		offset += chunk.byteLength;
-	}
-	try {
-		return {
-			contentType,
-			bodyBytes: length,
-			body: summarizeTraceValue(JSON.parse(new TextDecoder().decode(bytes))),
-		};
-	} catch {
-		return { contentType, bodyBytes: length, body: "<invalid-json>" };
-	}
-}
 
 function traceRequestHeaders(headers: Headers) {
 	return {
@@ -205,7 +138,7 @@ app.use("*", async (c, next) => {
 	const startedAt = performance.now();
 	c.header("x-request-id", requestId);
 	try {
-		const requestTrace = await traceJsonBody(c.req.raw.clone());
+		const requestTrace = await traceJsonBody(c.req.raw);
 		logger
 			.withMetadata({
 				requestId,
@@ -216,7 +149,7 @@ app.use("*", async (c, next) => {
 			})
 			.trace("request received");
 		await next();
-		const responseTrace = await traceJsonBody(c.res.clone());
+		const responseTrace = await traceJsonBody(c.res);
 		logger
 			.withMetadata({
 				requestId,
