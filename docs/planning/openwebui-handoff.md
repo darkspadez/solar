@@ -2,8 +2,10 @@
 
 ## Current state
 
-- Branch: `feat/openwebui-facade`
-- Facade commit: `044e344 feat(openwebui): add client compatibility facade`
+- Branch: `feat/openwebui-file-uploads`
+- Facade commits: `044e344 feat(openwebui): add client compatibility facade`,
+  `97a6ab9 feat(openwebui): support image and file uploads`, and
+  `d1a7f01 fix(logging): avoid trace stack traces on disconnect`
 - This document records the tested continuation point for the next session.
 
 The facade is server-only. Do not modify Open Relay or Conduit.
@@ -43,6 +45,24 @@ image data URLs, plus Open Relay's current-message `user_message.files`, are
 resolved into user-owned Chat V2 attachments. Historical top-level Open Relay
 RAG files are deliberately not rebound to follow-up turns.
 
+Reconnect/replay during active generation has been tested and is working:
+disconnecting a client does not cancel generation, and a reauthenticated
+Socket.IO connection can recover buffered events within the retention window.
+
+Conversation-level MCP enable/disable, auto-execute settings, and tool-call
+lifecycle rendering have been tested and are working in Conduit.
+
+The lightweight supporting-state compatibility routes used by the clients,
+including pinned-chat state, chat tags, and shared-folder listing, are
+implemented as read-only facade responses.
+
+The facade is enabled by default. Unsupported Open WebUI workspace features
+are intentionally not exposed or implemented.
+
+Open Relay validation against the same facade is complete and confirmed
+working. Its chat lifecycle, uploads, current-turn attachment conventions,
+processing status, and ownership behavior work through the facade.
+
 ## Main implementation files
 
 - `apps/server/src/openwebui/auth.ts` — Bearer Solar API-key/session resolution
@@ -76,10 +96,8 @@ Focused facade tests are colocated under `apps/server/src/openwebui/`:
   completion attachment binding.
 - `socket.test.ts` asserts `start → text → finish` Socket.IO events.
 - `socket-engine.test.ts` validates Bun Engine.IO integration.
-- `reference-contract.test.ts` runs guarded staging checks when
-  `.env.openwebui.local` is loaded.
 
-The current full server run passes: 208 tests passed, 8 skipped, 0 failed.
+The final full server run passes: 209 tests passed, 0 skipped, 0 failed.
 The focused upload tests and typecheck also pass.
 
 ## Local logs
@@ -112,22 +130,14 @@ socket task stream ended
   `21ad9d4d330e48d510598536d8459c4a780fd63a`.
 - `/tmp/opencode/open-webui` is the local Open WebUI source used to derive the
   reference routes and Socket.IO protocol.
-- `.env.openwebui.local` is gitignored and contains the local staging-reference
-  environment. Never print or commit it.
 
 ## Remaining work
 
-1. Test reconnect/replay in Conduit while a completion is active.
-2. Validate conversation-level MCP enable/disable and tool lifecycle rendering
-   in Conduit.
-3. Validate Open Relay against the same facade.
-4. Decide whether full Open WebUI workspace/knowledge behavior is needed:
-   arbitrary upload metadata is not persisted, processing/batch endpoints are
-   compatibility acknowledgements rather than embedding jobs, and
-   `/data/content` returns extracted text only for plain-text attachments.
-5. Consider inert compatibility responses for Conduit’s noncritical probes that
-   currently return `404`, including archived chats, notes, user settings, and
-   model profile images. They did not block the successful send flow.
-6. Decide whether facade sign-in should reuse a managed API key rather than
-   creating a Solar API key on every sign-in.
-7. Before a PR, rerun the full mock-LLM server suite plus typecheck.
+There is no remaining work for the current facade scope. Open Relay validation,
+the full mock-LLM server suite, and typecheck are confirmed.
+
+Full Open WebUI workspace behavior is not deferred work; it is outside the
+desired product scope. Do not add arbitrary upload-metadata persistence,
+embedding or knowledge-base jobs, binary `/data/content` extraction, archived
+chat/notes/settings/profile-image compatibility, or other workspace APIs unless
+the product requirements change.

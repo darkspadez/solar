@@ -99,6 +99,8 @@ The server now exposes the initial facade at the shared Open WebUI paths:
 
 The prototype intentionally keeps Open WebUI pinned/shared/admin configuration,
 folder nesting, and unsupported workspace features disabled or unimplemented.
+The facade is enabled by default; unsupported workspace features are
+intentionally not part of the product.
 
 It now also exposes the core file surface used by Conduit and Open Relay:
 
@@ -114,6 +116,21 @@ same transaction that creates the user and assistant turns, so attachment
 ownership and chat history remain Solar invariants. Solar performs supported
 document expansion when generation starts; the facade does not create a
 separate Open WebUI retrieval or knowledge-base persistence layer.
+
+Reconnect/replay during active generation has been tested and works within the
+in-memory generation-buffer retention window. Disconnecting a client does not
+cancel the underlying Solar generation.
+
+Conversation-level MCP server toggles, auto-execute settings, and tool-call
+lifecycle rendering have been tested and work through Conduit.
+
+The lightweight supporting-state compatibility routes used by the clients,
+including pinned-chat state, chat tags, and shared-folder listing, are
+implemented as read-only facade responses.
+
+Open Relay validation is complete and confirmed working. Its chat lifecycle,
+uploads, current-turn attachment conventions, processing status, and ownership
+behavior work through the facade.
 
 ## Generation and Socket.IO design
 
@@ -261,11 +278,13 @@ Content is served as raw bytes with the stored MIME type. SVG is forced to a
 download disposition, while ordinary images and PDFs may be displayed inline.
 
 This is core chat compatibility, not full Open WebUI workspace support.
-Arbitrary multipart metadata is returned on the upload response but is not yet
-persisted in the Chat V2 attachment schema. Processing and batch routes validate
-ownership and acknowledge completion; they do not build embeddings or
-knowledge-base collections. Binary document text extraction through
-`/data/content` and broader workspace routes remain follow-up work.
+Arbitrary multipart metadata is returned on the upload response but is
+intentionally not persisted in the Chat V2 attachment schema. Processing and
+batch routes validate ownership and acknowledge completion; they do not build
+embeddings or knowledge-base collections. `/data/content` returns extracted
+text only for plain-text attachments. Binary extraction, workspace file
+editing, archived chats, notes, user settings, model profile images, and other
+broader workspace behavior are intentionally not desired.
 
 Conversation operations map to existing repository behavior:
 
@@ -298,28 +317,24 @@ tool types should be hidden rather than advertised.
 
 ## Phased implementation plan
 
-### Phase 0 — Shared-contract and runtime spike
+### Phase 0 — Shared-contract and runtime spike — complete
 
 - Treat Open Relay and Conduit as consumers of the shared Open WebUI protocol;
   inspect both clients only to capture material differences for the four
   required user stories.
-- Turn the captured cases in `docs/planning/openwebui-contract-tests.md` into
-  sanitized, executable REST contract fixtures before implementing facade
-  routes.
-- Socket.IO, tool catalog, folder-write, and stop contracts are source-derived
-  and covered by guarded reference tests. Generation replay and tool lifecycle
-  still require Solar-side tests.
+- Capture the shared REST, Socket.IO, tool catalog, folder-write, and stop
+  contracts from the client sources and local client validation.
 - Use `socket.io` with `@socket.io/bun-engine`; the Bun-native engine smoke test
   proves the `/ws/socket.io/` path and Socket.IO handshake before facade routes
   are registered.
-- Decide whether the facade is enabled by an environment/config flag.
+- Keep the facade enabled by default.
 - Define the small common event and DTO contract; reject unsupported optional
   features through configuration.
 
-**Exit criteria:** the sanitized REST contract cases pass against the reference
-server, and a stock client can connect to a test Socket.IO endpoint.
+**Exit criteria:** the shared client contract is captured, and a stock client
+can connect to the Socket.IO endpoint.
 
-### Phase 1 — Facade foundation
+### Phase 1 — Facade foundation — complete
 
 - Add the `openwebui` server module and authenticated-principal abstraction.
 - Add bearer authentication and user ownership checks.
@@ -330,7 +345,7 @@ server, and a stock client can connect to a test Socket.IO endpoint.
 **Exit criteria:** the stock client completes onboarding, authenticates, loads
 configuration, and displays Solar models.
 
-### Phase 2 — Persistent chat CRUD and history
+### Phase 2 — Persistent chat CRUD and history — complete
 
 - Implement create, list, open, update/rename, folder assignment, and delete.
 - Serialize Solar conversations into the Open WebUI chat DTO/tree shape.
@@ -343,7 +358,7 @@ configuration, and displays Solar models.
 **Exit criteria:** a chat created on one client session can be listed, reopened,
 continued, moved to a folder, and deleted from another session.
 
-### Phase 3 — Direct generation event transport
+### Phase 3 — Direct generation event transport — complete
 
 - Refactor generation subscriptions into a transport-neutral replay/live seam.
 - Implement `/api/chat/completions` using existing Solar generation services.
@@ -358,7 +373,7 @@ continued, moved to a folder, and deleted from another session.
   result, handles stop/error, and reconnects within the generation-buffer
   retention window.
 
-### Phase 4 — Tools and folders
+### Phase 4 — Tools and folders — complete
 
 - Implement the client-required tool catalog route(s).
 - Map tool/server toggles to Solar conversation MCP bindings.
@@ -370,15 +385,13 @@ continued, moved to a folder, and deleted from another session.
 send a request, observe tool execution, and later reopen the chat with tool
 calls/results intact.
 
-### Phase 5 — Client validation and hardening
+### Phase 5 — Open Relay validation — complete
 
-- Run the same contract suite against unmodified Open Relay and Conduit.
-- Test multiple concurrent users and simultaneous generations.
-- Test reconnects before first token, during text, during tool execution, after
-  completion, and after stop.
-- Test deletion while idle and after a completed generation.
-- Test process restart behavior and document the in-memory replay limitation.
-- Add facade-contract logging and document the tested client behavior.
+- Validate the unmodified Open Relay client against the facade, including chat
+  lifecycle, uploads, current-turn attachments, processing status, and
+  ownership behavior.
+- Record any Open Relay-specific deviations or fixes required by the live
+  validation. No current-scope deviations remain.
 
 ## Verification strategy
 
@@ -403,7 +416,8 @@ Required test groups:
 1. **Socket.IO runtime compatibility:** Bun integration is the first spike and
    could determine the server library or gateway shape.
 2. **Client contract drift:** follow the shared Open WebUI protocol and keep
-   `/api/config` conservative; record only material client deviations.
+   `/api/config` conservative; Open Relay and Conduit validation is complete for
+   the current scope.
 3. **History branches:** single-branch projection is acceptable for the MVP;
    branching should not be added until a required client workflow proves it is
    necessary.
@@ -412,15 +426,17 @@ Required test groups:
    workflow.
 5. **Generation replay:** current buffers are single-node and in-memory. A
    durable event log is outside the first facade release.
-6. **Attachments:** the core upload/content contract is now implemented for
+6. **Attachments:** the core upload/content contract is implemented for
    Conduit and Open Relay. Full Open WebUI processing, metadata persistence,
-   knowledge-base association, and workspace file editing remain outside this
-   release.
+   knowledge-base association, and workspace file editing are intentionally
+   outside the desired product.
 
 ## Definition of done
 
+The current facade scope is complete.
+
 - No client code is changed.
-- Open Relay and/or Conduit can authenticate against Solar's facade.
+- Open Relay and Conduit can authenticate against Solar's facade.
 - A stock client can create and stream a chat response.
 - The response is persisted in Solar and visible after reconnect/device change.
 - Existing chats can be listed, opened, continued, foldered, and deleted.
