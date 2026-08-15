@@ -31,4 +31,9 @@ export const config = {
 		process.env.SOLAR_AIRGAP_MODE ?? process.env.AIRGAP_MODE,
 	),
 	attachmentsDataDir: process.env.SOLAR_ATTACHMENTS_DIR ?? "data/attachments",
+	maxToolOutputCharacters: Number(
+		process.env.SOLAR_MAX_TOOL_OUTPUT_CHARS ??
+			process.env.MAX_TOOL_OUTPUT_CHARS ??
+			100_000,
+	),
 } as const;

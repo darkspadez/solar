@@ -23,7 +23,7 @@ mock.module("./catalog", () => ({
 	},
 }));
 
-const { MOCK, generateTitle, streamChat } = await import("./models");
+const { MOCK, generateTitle, streamChat, truncateToolOutput } = await import("./models");
 const { modelCallTelemetry } = await import("../context/telemetry");
 
 if (originalMockLlm === undefined) delete process.env.SOLAR_MOCK_LLM;
@@ -217,6 +217,41 @@ describe("mock model streaming", () => {
 			toolStepsCompleted: false,
 		});
 		expect(call).not.toHaveProperty("error.errorMessage");
+	});
+
+	test("allows retrySafe on context overflow even when tool steps completed", () => {
+		const call = modelCallTelemetry(
+			selection,
+			{
+				api: "openai-completions",
+				provider: "openai",
+				model: "gpt-4o",
+				content: [],
+				usage: { input: 100, output: 0 },
+				stopReason: "error",
+				errorMessage: "context length exceeded",
+				timestamp: 1,
+			} as never,
+			10,
+			{},
+			128_000,
+			undefined,
+			false,
+			true,
+		);
+		expect(call.error).toEqual({
+			kind: "context_overflow",
+			retrySafe: true,
+			outputStarted: false,
+			toolStepsCompleted: true,
+		});
+	});
+
+	test("truncates large tool output and appends warning message", () => {
+		const longString = "a".repeat(150);
+		const truncated = truncateToolOutput(longString, 100);
+		expect(truncated).toContain("a".repeat(100));
+		expect(truncated).toContain("[Tool output truncated: 50 characters omitted.");
 	});
 
 	test("labels calls after executing tools as tool-loop calls", async () => {
@@ -488,5 +523,70 @@ describe("mock model streaming", () => {
 				.map((event) => event.delta)
 				.join(""),
 		).toBe("Done: exposed the script.");
+	});
+
+	test("truncates oversized tool results during streaming", async () => {
+		expectNoProviderCalls = false;
+		let receivedToolResult = "";
+		let callCount = 0;
+		providerStream = async function* (_model, context) {
+			callCount += 1;
+			if (callCount === 1) {
+				yield {
+					type: "done",
+					reason: "toolUse",
+					message: {
+						api: "test",
+						provider: "test",
+						model: "model",
+						content: [
+							{ type: "toolCall", id: "call-1", name: "dump", arguments: {} },
+						],
+						usage: { input: 5, output: 2 },
+						stopReason: "toolUse",
+						timestamp: 1,
+					},
+				};
+				return;
+			}
+			const lastMsg = context.messages.at(-1);
+			if (lastMsg?.role === "toolResult") {
+				receivedToolResult = lastMsg.content[0].text;
+			}
+			yield {
+				type: "done",
+				reason: "stop",
+				message: {
+					api: "test",
+					provider: "test",
+					model: "model",
+					content: [{ type: "text", text: "done" }],
+					usage: { input: 8, output: 2 },
+					stopReason: "stop",
+					timestamp: 2,
+				},
+			};
+		};
+
+		const events: any[] = [];
+		for await (const event of streamChat(
+			contextFor("Dump"),
+			{ provider: "test", endpointId: "test", modelId: "model", api: "test" },
+			{},
+			new AbortController().signal,
+			[
+				{
+					tool: { name: "dump" },
+					execute: async () => ({
+						content: "x".repeat(150_000),
+						isError: false,
+					}),
+				},
+			] as never,
+		)) {
+			events.push(event);
+		}
+
+		expect(receivedToolResult).toContain("[Tool output truncated:");
 	});
 });

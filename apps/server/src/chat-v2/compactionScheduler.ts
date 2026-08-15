@@ -15,6 +15,26 @@ export interface CompactionTriggerPolicy {
 	targetTokens: number;
 }
 
+function getMessagePromptTokens(record: CanonicalMessageRecord): number | null {
+	if (record.message.role === "assistant") {
+		const usage = record.message.usage;
+		if (usage && typeof usage.input === "number") {
+			return usage.input + (usage.cacheRead ?? 0);
+		}
+	}
+	return null;
+}
+
+function getMessageTotalTokens(record: CanonicalMessageRecord): number | null {
+	if (record.message.role === "assistant") {
+		const usage = record.message.usage;
+		if (usage && typeof usage.input === "number") {
+			return usage.input + (usage.cacheRead ?? 0) + (usage.output ?? 0);
+		}
+	}
+	return null;
+}
+
 function sumTokens(messages: readonly CanonicalMessageRecord[]): number {
 	return messages.reduce(
 		// biome-ignore lint/suspicious/noExplicitAny: pi-agent-core's AgentMessage is a superset of pi-ai's Message
@@ -24,9 +44,9 @@ function sumTokens(messages: readonly CanonicalMessageRecord[]): number {
 }
 
 /**
- * Queues the oldest uncompacted prefix once real (estimated) token usage
- * exceeds the model's configured soft trigger, retaining as much recent
- * history as fits under the target budget.
+ * Queues the oldest uncompacted prefix once upstream token usage (or
+ * estimated cold-start tokens) exceeds the model's configured soft trigger,
+ * retaining as much recent history as fits under the target budget.
  */
 export async function enqueueCompactionForCompletedGeneration(
 	repository: ChatV2Repository,
@@ -54,21 +74,45 @@ export async function enqueueCompactionForCompletedGeneration(
 	const first = compactedThrough + 1;
 	if (messages.length - first < MIN_COMPACTION_MESSAGES) return null;
 
-	const totalTokens = sumTokens(messages.slice(first));
+	const uncompactedMessages = messages.slice(first);
+	const latestAssistant = [...uncompactedMessages]
+		.reverse()
+		.find((m) => m.message.role === "assistant");
+	const upstreamTotalTokens = latestAssistant
+		? getMessageTotalTokens(latestAssistant)
+		: null;
+	const hasRealUpstreamUsage =
+		typeof upstreamTotalTokens === "number" && upstreamTotalTokens > 0;
+
+	const totalTokens = hasRealUpstreamUsage
+		? upstreamTotalTokens
+		: sumTokens(uncompactedMessages);
 	if (totalTokens <= policy.softTriggerTokens) return null;
 
 	// Keep the final RETAIN_LIVE_MESSAGES live no matter what, then extend the
 	// live tail further back while it still fits under the target budget.
 	let boundary = Math.max(messages.length - RETAIN_LIVE_MESSAGES, first);
-	let liveTokens = sumTokens(messages.slice(boundary));
-	while (boundary - 1 > first) {
-		const next = estimateTokens(
-			// biome-ignore lint/suspicious/noExplicitAny: pi-agent-core's AgentMessage is a superset of pi-ai's Message
-			messages[boundary - 1]!.message as any,
-		);
-		if (liveTokens + next > policy.targetTokens) break;
-		liveTokens += next;
-		boundary--;
+	if (hasRealUpstreamUsage && latestAssistant) {
+		while (boundary - 1 > first) {
+			const candidateRecord = messages[boundary - 1]!;
+			const promptTokens = getMessagePromptTokens(candidateRecord);
+			if (promptTokens != null) {
+				const liveTokens = upstreamTotalTokens - promptTokens;
+				if (liveTokens > policy.targetTokens) break;
+			}
+			boundary--;
+		}
+	} else {
+		let liveTokens = sumTokens(messages.slice(boundary));
+		while (boundary - 1 > first) {
+			const next = estimateTokens(
+				// biome-ignore lint/suspicious/noExplicitAny: pi-agent-core's AgentMessage is a superset of pi-ai's Message
+				messages[boundary - 1]!.message as any,
+			);
+			if (liveTokens + next > policy.targetTokens) break;
+			liveTokens += next;
+			boundary--;
+		}
 	}
 	const candidateLast = boundary - 1;
 	const safeRange = findSafeCompactionRange(messages, first, candidateLast);

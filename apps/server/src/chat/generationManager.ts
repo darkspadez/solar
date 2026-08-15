@@ -504,6 +504,11 @@ export class GenerationManager {
 						context = fresh.context;
 						gen.params = fresh.params;
 						gen.telemetry = { ...gen.telemetry, retryAttempt: 1 };
+						gen.steps = [];
+						gen.text = "";
+						gen.reasoning = "";
+						gen.toolCalls = [];
+						gen.parts = null;
 						continue;
 					}
 					throw error;

@@ -190,4 +190,74 @@ describe("chat-v2 compaction scheduler", () => {
 			}),
 		).toBeNull();
 	});
+
+	test("triggers compaction using real upstream usage when character estimation is low", async () => {
+		const database = await createV2TestDatabase();
+		databases.push(database);
+		database.seedUser(USER_ID);
+		const repository = new ChatV2Repository(database.db);
+		await repository.createConversation(USER_ID, {
+			id: CONVERSATION_ID,
+			title: "Upstream usage compaction",
+		});
+
+		// Short messages (few chars), but assistant has high upstream token usage
+		const assistant1: AssistantMessage = {
+			...assistant("short answer 1"),
+			usage: {
+				...zeroUsage(),
+				input: 50_000,
+				output: 10_000,
+				totalTokens: 60_000,
+			},
+		};
+		const assistant2: AssistantMessage = {
+			...assistant("short answer 2"),
+			usage: {
+				...zeroUsage(),
+				input: 280_000,
+				output: 15_000,
+				totalTokens: 295_000,
+			},
+		};
+		const messages: Message[] = [
+			{ role: "user", content: "first question", timestamp: 1 },
+			assistant1,
+			{ role: "user", content: "second question", timestamp: 2 },
+			assistant2,
+		];
+		for (const [ordinal, message] of messages.entries()) {
+			const turnId = `turn-${ordinal}`;
+			await repository.createTurn(USER_ID, CONVERSATION_ID, {
+				id: turnId,
+				ordinal,
+				role: message.role === "user" ? "user" : "assistant",
+				origin: "text",
+				status: "complete",
+			});
+			await repository.appendCanonicalMessages(USER_ID, CONVERSATION_ID, [
+				{
+					id: `message-${ordinal}`,
+					turnId,
+					message,
+					origin: "text",
+					status: "complete",
+				},
+			]);
+		}
+
+		// Policy triggers at 250k. Local char heuristic is only ~20 tokens, but upstream is 295k
+		const policy = {
+			enabled: true,
+			softTriggerTokens: 250_000,
+			targetTokens: 100_000,
+		};
+		const jobId = await enqueueCompactionForCompletedGeneration(
+			repository,
+			USER_ID,
+			CONVERSATION_ID,
+			policy,
+		);
+		expect(jobId).toBeString();
+	});
 });

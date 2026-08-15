@@ -76,6 +76,7 @@ export function projectVisibleTurns(
 		if (current.role !== role)
 			throw new Error(`visible turn ${record.turnId} mixes user and assistant messages`);
 		current.messages.push(record);
+		current.status = record.status;
 		// Tool results carry raw tool output (e.g. full search-result payloads),
 		// not user-facing reply text — never fold them into the visible turn text.
 		if (record.message.role !== "toolResult") {

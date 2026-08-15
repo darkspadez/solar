@@ -50,7 +50,9 @@ import {
 } from "../chat-v2/compactionScheduler";
 import { CompactionService } from "../chat-v2/compaction";
 import { createV2Summarizer } from "../chat-v2/summarizer";
+import type { MessageStatus } from "../db/schema";
 import { projectVisibleTurns, type VisibleTurn } from "../chat-v2/projection";
+import type { CanonicalMessageStatus } from "../chat-v2/types";
 import { zeroUsage } from "../chat-v2/validation";
 import { logger } from "../logger";
 
@@ -452,6 +454,48 @@ export async function stopGeneration(
 	}
 }
 
+function sanitizeStepMessages(steps: readonly Message[]): Message[] {
+	const result: Message[] = [];
+	const pendingCalls = new Map<string, string>();
+	for (const msg of steps) {
+		if (msg.role === "assistant") {
+			for (const [callId, toolName] of pendingCalls.entries()) {
+				result.push({
+					role: "toolResult",
+					toolCallId: callId,
+					toolName,
+					content: [{ type: "text", text: "Tool execution was interrupted." }],
+					isError: true,
+					timestamp: Date.now(),
+				});
+			}
+			pendingCalls.clear();
+			result.push(msg);
+			if (Array.isArray(msg.content)) {
+				for (const part of msg.content) {
+					if (part.type === "toolCall") {
+						pendingCalls.set(part.id, part.name);
+					}
+				}
+			}
+		} else if (msg.role === "toolResult") {
+			pendingCalls.delete(msg.toolCallId);
+			result.push(msg);
+		}
+	}
+	for (const [callId, toolName] of pendingCalls.entries()) {
+		result.push({
+			role: "toolResult",
+			toolCallId: callId,
+			toolName,
+			content: [{ type: "text", text: "Tool execution was interrupted." }],
+			isError: true,
+			timestamp: Date.now(),
+		});
+	}
+	return result;
+}
+
 async function startAssistantTurn(input: {
 	userId: string;
 	isAdmin: boolean;
@@ -568,11 +612,12 @@ async function startAssistantTurn(input: {
 			return { context: rebuilt.context, params };
 		},
 		persist: async ({ steps, parts, status, text }) => {
-			const stepMessages = (steps as Message[]).filter(
+			const rawStepMessages = (steps as Message[]).filter(
 				(step) =>
 					step && (step.role === "assistant" || step.role === "toolResult"),
 			);
-			const finalMessage = canonicalAssistant(parts, selection, text);
+			const stepMessages = sanitizeStepMessages(rawStepMessages);
+			const finalMessage = canonicalAssistant(parts, selection, text, status);
 			const orderedMessages = [...stepMessages, finalMessage];
 			const canonicalMessages = orderedMessages.map((message, index) => ({
 				id:
@@ -582,7 +627,10 @@ async function startAssistantTurn(input: {
 				turnId: input.assistantTurnId,
 				message,
 				origin: "text" as const,
-				status: "complete" as const,
+				status:
+					status === "error" && index === orderedMessages.length - 1
+						? ("error" as const)
+						: ("complete" as const),
 			}));
 
 			if (status === "error") {
@@ -647,10 +695,7 @@ async function resolveCompactionPolicy(
 		capabilities.contextWindow ?? FALLBACK_CONTEXT_WINDOW_TOKENS;
 	return {
 		enabled: true,
-		softTriggerTokens: Math.max(
-			contextWindow - DEFAULT_COMPACTION_SETTINGS.reserveTokens,
-			0,
-		),
+		softTriggerTokens: Math.max(Math.round(contextWindow * 0.75), 0),
 		targetTokens: DEFAULT_COMPACTION_SETTINGS.keepRecentTokens,
 	};
 }
@@ -705,20 +750,30 @@ function canonicalAssistant(
 	parts: unknown,
 	selection: { provider: string; api: string; modelId: string },
 	text: string,
+	status: CanonicalMessageStatus | MessageStatus = "complete",
 ): AssistantMessage {
-	if (parts && typeof parts === "object") {
+	if (status !== "error" && parts && typeof parts === "object") {
 		const message = parts as AssistantMessage;
 		return { ...message, usage: canonicalUsage(message.usage) };
 	}
 	return {
 		role: "assistant",
-		content: [{ type: "text", text: text || "Generation stopped" }],
+		content: [
+			{
+				type: "text",
+				text:
+					text ||
+					(status === "error"
+						? "Generation failed"
+						: "Generation stopped"),
+			},
+		],
 		timestamp: Date.now(),
 		api: selection.api,
 		provider: selection.provider,
 		model: selection.modelId,
 		usage: zeroUsage(),
-		stopReason: "stop",
+		stopReason: status === "error" ? "error" : "stop",
 	};
 }
 

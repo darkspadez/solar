@@ -133,7 +133,6 @@ export function modelCallTelemetry(
 						retrySafe:
 							overflowed &&
 							!outputStarted &&
-							!toolStepsCompleted &&
 							(metadata.retryAttempt ?? 0) === 0,
 						outputStarted,
 						toolStepsCompleted,

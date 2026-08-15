@@ -4,6 +4,7 @@ import type {
 	Context,
 	ToolResultMessage,
 } from "@earendil-works/pi-ai";
+import { config } from "../config";
 import type { ResolvedTool } from "./mcp";
 import type { ToolCallResultEvent } from "./adapter";
 import {
@@ -34,6 +35,15 @@ export interface StreamChatOptions {
  * used for local development and UI verification only. All other providers are
  * streamed through pi-ai with the DB-configured key/baseURL.
  */
+export function truncateToolOutput(
+	output: string,
+	maxChars = config.maxToolOutputCharacters,
+): string {
+	if (maxChars <= 0 || output.length <= maxChars) return output;
+	const omittedChars = output.length - maxChars;
+	return `${output.slice(0, maxChars)}\n\n[Tool output truncated: ${omittedChars.toLocaleString()} characters omitted. Re-run tool with more specific filters or omit diagnostics if needed.]`;
+}
+
 export async function* streamChat(
 	context: Context,
 	selection: ModelSelection,
@@ -236,24 +246,27 @@ export async function* streamChat(
 				}
 				try {
 					const result = await execute(call.arguments);
+					const output = truncateToolOutput(result.content);
 					return {
 						result: {
 							role: "toolResult" as const,
 							toolCallId: call.id,
 							toolName: call.name,
-							content: [{ type: "text" as const, text: result.content }],
+							content: [{ type: "text" as const, text: output }],
 							isError: result.isError,
 							timestamp: Date.now(),
 						},
 						chunk: {
 							type: "tool-call-result" as const,
 							toolCallId: call.id,
-							output: result.content,
+							output,
 							isError: result.isError,
 						},
 					};
 				} catch (error) {
-					const output = error instanceof Error ? error.message : String(error);
+					const rawOutput =
+						error instanceof Error ? error.message : String(error);
+					const output = truncateToolOutput(rawOutput);
 					return {
 						result: {
 							role: "toolResult" as const,

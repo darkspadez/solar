@@ -309,7 +309,7 @@ const conversationRouter = router({
 			const [latest, totals] = await Promise.all([
 				db
 					.selectFrom("provider_call_telemetry")
-					.select(["inputTokens", "cacheReadTokens"])
+					.select(["inputTokens", "cacheReadTokens", "outputTokens"])
 					.where("conversationId", "=", input.conversationId)
 					.where("purpose", "in", ["chat", "tool_loop"])
 					.orderBy("createdAt", "desc")
@@ -322,13 +322,38 @@ const conversationRouter = router({
 					.where("conversationId", "=", input.conversationId)
 					.executeTakeFirstOrThrow(),
 			]);
+
+			let contextTokens: number | null = null;
+			if (latest?.inputTokens != null) {
+				contextTokens = latest.inputTokens + (latest.cacheReadTokens ?? 0);
+			} else {
+				const latestGen = await db
+					.selectFrom("v2_generation")
+					.select(["usageJson"])
+					.where("conversationId", "=", input.conversationId)
+					.where("status", "=", "complete")
+					.orderBy("createdAt", "desc")
+					.executeTakeFirst();
+				if (latestGen?.usageJson) {
+					try {
+						const usage = JSON.parse(latestGen.usageJson) as {
+							input?: number;
+							output?: number;
+							cacheRead?: number;
+						};
+						if (typeof usage.input === "number") {
+							contextTokens = usage.input + (usage.cacheRead ?? 0);
+						}
+					} catch {}
+				}
+			}
+
 			return {
-				contextTokens:
-					latest?.inputTokens === null || latest?.inputTokens === undefined
-						? null
-						: latest.inputTokens + (latest.cacheReadTokens ?? 0),
+				contextTokens,
 				contextWindowTokens,
-				compactionAtTokens: Math.round(contextWindowTokens * 0.75),
+				compactionAtTokens:
+					resolved?.contextPolicy?.softTriggerTokens ??
+					Math.round(contextWindowTokens * 0.75),
 				costMicros: totals.costMicros,
 			};
 		}),
