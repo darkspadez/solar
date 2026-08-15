@@ -39,23 +39,29 @@ output or `.dev-server.log`. No seed output means the database already has
 users. Delete `apps/server/solar.db*` only when an intentional local reset is
 requested.
 
-Use the URL printed by `bun run solar dev status` and the generated key for
-local history investigation:
+Use the local CLI directly (which auto-discovers the running dev server's
+port and seeded development API key) or pass explicit connection parameters:
 
 ```bash
-SOLAR_URL=http://localhost:<port> SOLAR_API_KEY=<generated-key> \
-  bun run solar history list --user admin@solar.local
+bun run solar history list
+bun run solar history list --user admin@solar.local
 ```
 
 ## Investigate an existing server
 
 History commands support `list`, `inspect`, `export`, `export-all`, and
-`import`. They require an API key and default to a local server unless `--url`
-or `SOLAR_URL` is set. Prefer read-only commands (`list`, `inspect`, `export`)
-for investigation; import only when explicitly requested.
+`import`. They require an API key and default to the local running server unless
+`--url`, `SOLAR_URL`, or `--staging` is set. Prefer read-only commands
+(`list`, `inspect`, `export`) for investigation; import only when explicitly requested.
 
-For staging, keep staging credentials in `SOLAR_STAGING_*` variables and map
-them explicitly for the management command:
+For staging, use the `--staging` convenience flag (which reads `SOLAR_STAGING_URL`
+and `SOLAR_STAGING_API_KEY`) or map them explicitly:
+
+```bash
+bun run solar history list --staging --user <user@example.com>
+```
+
+Or via explicit environment variables:
 
 ```bash
 SOLAR_URL="$SOLAR_STAGING_URL" SOLAR_API_KEY="$SOLAR_STAGING_API_KEY" \

@@ -5,7 +5,7 @@ Guidance for AI agents working in this repository.
 ## Sub-domain Context
 - `apps/server/AGENTS.md` — Server entrypoint, Kysely/Better Auth DB, chat generation & streaming.
 - `apps/web/AGENTS.md` — Frontend styling, assistant-ui, Bun HMR, web tests.
-- `docs/chat-history.md` — History CLI (`solar history`) & staging deploy.
+- `.agents/skills/solar-cli/SKILL.md` — History CLI (`solar history`) & staging deploy.
 
 ## Current Constraints (Exploratory Phase)
 Do **not** add unless explicitly requested:
