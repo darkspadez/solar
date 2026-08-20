@@ -40,7 +40,7 @@
       "command": "bun run --cwd apps/server codegen"
     },
     "test": {
-      "command": "bun test --isolate apps/server/src && bun run --cwd apps/web test"
+      "command": "bun run test"
     }
   },
   "metadataGeneration": {

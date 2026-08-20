@@ -8,7 +8,7 @@
   },
   "scripts": {
     "build": "bun run build.ts",
-    "test": "bun test src",
+    "test": "bun test --parallel src",
     "test:watch": "bun test --watch src"
   },
   "dependencies": {

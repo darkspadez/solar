@@ -1,6 +1,5 @@
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import { DiskResource, PathSpec } from "@struktoai/mirage-node";
-import { imageSize } from "image-size";
 import { config } from "../config";
 import { db } from "../db";
 import type { AttachmentKind } from "../db/schema";
@@ -60,12 +59,12 @@ function classify(mimeType: string): AttachmentKind | null {
 	return null;
 }
 
-function dimensions(bytes: Uint8Array): {
+async function dimensions(bytes: Uint8Array): Promise<{
 	width: number | null;
 	height: number | null;
-} {
+}> {
 	try {
-		const { width, height } = imageSize(bytes);
+		const { width, height } = await new Bun.Image(bytes).metadata();
 		if (typeof width === "number" && typeof height === "number") {
 			return { width, height };
 		}
@@ -91,7 +90,9 @@ export async function saveAttachmentFile(params: {
 		throw new AttachmentError("File exceeds the 20 MB limit");
 	}
 	const imageDimensions =
-		kind === "image" ? dimensions(params.bytes) : { width: null, height: null };
+		kind === "image"
+			? await dimensions(params.bytes)
+			: { width: null, height: null };
 	const documentMetadata =
 		params.mimeType === "application/pdf"
 			? await pdfMetadata(params.bytes).catch(() => ({

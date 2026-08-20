@@ -9,6 +9,7 @@ await rm(outputDirectory, { recursive: true, force: true });
 const result = await Bun.build({
 	entrypoints: ["./index.html"],
 	outdir: outputDirectory,
+	reactCompiler: true,
 	define: { "process.env.NODE_ENV": JSON.stringify("production") },
 	minify: true,
 	plugins: [tailwind],
