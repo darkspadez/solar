@@ -85,7 +85,7 @@ let contextState: {
 		tokensAfter: number;
 		revision: number;
 		createdAt: string;
-		retainedMessageBoundaryId: string;
+		retainedMessageBoundaryId: string | null;
 	};
 } = { summaryEvent: null };
 let historyCalls = 0;
@@ -214,16 +214,18 @@ describe("useSolarRuntime compaction", () => {
 				tokensAfter: 8_000,
 				revision: 2,
 				createdAt: "2026-07-19T20:14:47.000Z",
-				retainedMessageBoundaryId: "u2",
+				retainedMessageBoundaryId: null,
 			},
 		};
 		rendered.rerender({ summaryRevision: 2 });
 
 		await waitFor(() => {
 			expect(historyCalls).toBe(2);
+			// pi compacts in-process with no retained-message boundary; the badge
+			// pins to the final message of the current path instead.
 			const marker = rendered.result.current.thread
 				.getState()
-				.messages.find((message) => message.id === "u2")?.metadata?.custom as
+				.messages.find((message) => message.id === "a2")?.metadata?.custom as
 				| {
 						summaryEvent?: {
 							tokensBefore: number;
@@ -235,7 +237,7 @@ describe("useSolarRuntime compaction", () => {
 			expect(marker?.summaryEvent).toMatchObject({
 				tokensBefore: 272_000,
 				tokensAfter: 8_000,
-				position: "before",
+				position: "after",
 			});
 		});
 		rendered.unmount();

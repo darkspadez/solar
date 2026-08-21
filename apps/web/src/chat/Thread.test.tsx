@@ -341,24 +341,4 @@ describe("EmptyAssistantResponse", () => {
 			screen.getByText("The model returned an empty response."),
 		).toBeInTheDocument();
 	});
-
-	test("offers a stale response force-stop control", () => {
-		let forceStopped = false;
-		render(
-			<EmptyAssistantResponse
-				isRunning={false}
-				isStale
-				onForceStop={async () => {
-					forceStopped = true;
-				}}
-			/>,
-		);
-
-		const control = screen.getByTitle("Force stop response");
-		expect(control.querySelector(".solar-response-loader")).toBeTruthy();
-		fireEvent.mouseEnter(control);
-		expect(control.querySelector(".lucide-ban")).toBeTruthy();
-		fireEvent.click(control);
-		expect(forceStopped).toBe(true);
-	});
 });

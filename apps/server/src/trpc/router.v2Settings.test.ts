@@ -18,9 +18,6 @@ mock.module("../chat/attachments", () => ({
 	deleteAttachmentFilesByStorageKey: async () => {},
 	expandAttachmentRows: async () => ({ parts: [], documents: [] }),
 }));
-mock.module("../chat/generationManager", () => ({
-	generationManager: { isActive: () => false },
-}));
 mock.module("../logger", () => ({
 	logger: {
 		withMetadata: () => ({ trace: () => {}, info: () => {}, warn: () => {}, error: () => {} }),
@@ -83,10 +80,11 @@ mock.module("../chat/catalog", () => ({
 	setTitlePrompt: async () => {},
 	importProviderModels: async () => {},
 	loadProviderConfigs: async () => [],
+	normalizeBaseUrlForApi: () => "",
 }));
 
 const { appRouter } = await import("./router");
-const { chatV2Repository } = await import("../chat/v2Live");
+const { chatV2Repository } = await import("../chat-v2/db/repository");
 
 function caller() {
 	return appRouter.createCaller({ user: { id: USER_ID, role: "user" } } as never);
@@ -263,7 +261,7 @@ describe("chat-v2 conversation settings wiring", () => {
 		expect(await rpc.tag.list()).toEqual([]);
 	});
 
-	test("metrics records and sums provider call telemetry for a v2 conversation", async () => {
+	test("metrics is empty for a conversation without a pi session", async () => {
 		const conversation = await chatV2Repository.createConversation(USER_ID, {
 			title: "Metrics chat",
 			provider: "mock",
@@ -272,35 +270,9 @@ describe("chat-v2 conversation settings wiring", () => {
 			modelApi: "mock",
 		});
 		const rpc = caller();
-
-		// No usage recorded yet.
-		expect(await rpc.conversation.metrics({ conversationId: conversation.id })).toMatchObject({
-			contextTokens: null,
-		});
-
-		// Regression test: provider_call_telemetry previously had foreign keys
-		// into the removed v1 conversation/message tables, so every insert with
-		// a v2 conversation/turn id failed with SQLITE_CONSTRAINT_FOREIGNKEY.
-		await database.db
-			.insertInto("provider_call_telemetry")
-			.values({
-				id: "telemetry-1",
-				conversationId: conversation.id,
-				messageId: "not-a-real-turn-id",
-				purpose: "chat",
-				provider: "mock",
-				api: "mock",
-				modelId: "mock",
-				inputTokens: 100,
-				outputTokens: 20,
-				cacheReadTokens: 0,
-				estimatedCostMicros: 50,
-			})
-			.execute();
-
-		const metrics = await rpc.conversation.metrics({ conversationId: conversation.id });
-		expect(metrics.contextTokens).toBe(100);
-		expect(metrics.costMicros).toBe(50);
+		expect(
+			await rpc.conversation.metrics({ conversationId: conversation.id }),
+		).toMatchObject({ contextTokens: null, costMicros: 0 });
 	});
 
 	test("folder and tag mutations reject ownership across users", async () => {

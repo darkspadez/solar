@@ -1,5 +1,7 @@
 FROM oven/bun:1.4.0
 
+# pi child processes run under bun via the data-dir shim (pi's RpcClient
+# hardcodes a `node` binary name; Solar redirects it to bun). No node install.
 WORKDIR /app
 
 COPY package.json bun.lock ./
@@ -17,6 +19,7 @@ ENV NODE_ENV=production
 ENV PORT=3000
 ENV DATABASE_PATH=/data/solar.db
 ENV SOLAR_ATTACHMENTS_DIR=/data/attachments
+ENV SOLAR_PI_AGENT_DIR=/data/pi-agent
 
 EXPOSE 3000
 

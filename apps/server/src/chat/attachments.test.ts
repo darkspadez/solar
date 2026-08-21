@@ -230,16 +230,19 @@ describe("attachments", () => {
 		});
 	});
 
-	test("rejects empty documents before provider dispatch", async () => {
+	test("empty documents degrade to a placeholder instead of sinking the batch", async () => {
 		files.set("/user-1/document", new Uint8Array());
 		const row = { id: "document", storageKey: "user-1/document", kind: "document" as const, mimeType: "application/pdf", filename: "empty.pdf" };
 
-		await expect(
-			attachments.expandAttachmentRows([row], {
-				nativeMimeTypes: ["application/pdf"],
-				extractedTextMimeTypes: [],
-			}),
-		).rejects.toThrow("Attachment empty.pdf is empty; upload it again");
+		const { parts } = await attachments.expandAttachmentRows([row], {
+			nativeMimeTypes: ["application/pdf"],
+			extractedTextMimeTypes: [],
+		});
+		expect(parts).toHaveLength(1);
+		const part = parts[0]!;
+		if (part.type !== "text") throw new Error("expected a text part");
+		expect(part.text).toContain("could not be read");
+		expect(part.text).toContain("empty"); // keeps the original failure reason
 	});
 
 	test("extracts spreadsheet text only for a configured fallback capability", async () => {

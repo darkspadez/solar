@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useTRPC } from "../trpc";
 import { trpcClient } from "../trpcClient";
+import { newId } from "../id";
 import {
 	isDocumentMimeType,
 	SolarAttachmentAdapter,
@@ -181,14 +182,10 @@ export function useSolarRuntime(
 		[queryClient, trpc.conversation.list, upsertAssistant],
 	);
 
-	const forceStopStaleTurn = useCallback(async (messageId: string) => {
-		const res = await fetch("/api/chat/force-stop", {
-			method: "POST",
-			headers: jsonHeaders,
-			body: JSON.stringify({ messageId }),
-		});
-		if (res.ok) await loadHistoryRef.current();
-	}, []);
+	// The stale-turn force-stop control was a chat-v2 artifact (a streaming
+	// placeholder row left behind by a crashed process). Under pi there is no
+	// placeholder — the session file only records completed state — so the
+	// state cannot be entered from history anymore and the control is gone.
 
 	// Reload the canonical history from the server, replacing local state so ids
 	// stay in sync with the DB. Returns the rows (for the resume check).
@@ -197,15 +194,13 @@ export function useSolarRuntime(
 			trpcClient.conversation.messages.query({ conversationId }),
 			trpcClient.conversation.contextState.query({ conversationId }),
 		]);
-		const boundaryIndex = contextState.summaryEvent
-			? rows.findIndex(
-					(row) =>
-						row.id === contextState.summaryEvent?.retainedMessageBoundaryId,
-				)
-			: -1;
-		const markerIndex = boundaryIndex >= 0 ? boundaryIndex : rows.length - 1;
-		loadedSummaryRevisionRef.current =
-			contextState.summaryEvent?.revision ?? null;
+		// pi sessions hide summarized history server-side (the transcript we get
+		// back is already the current path), so there is no retained-message
+		// boundary marker to compute on the client.
+		const markerIndex = rows.length - 1;
+		loadedSummaryRevisionRef.current = contextState.summaryEvent
+			? contextState.summaryEvent.revision
+			: null;
 		setMessages(
 			rows.map((r, index) => ({
 				id: r.id,
@@ -224,20 +219,15 @@ export function useSolarRuntime(
 								tokensAfter: contextState.summaryEvent.tokensAfter,
 								revision: contextState.summaryEvent.revision,
 								createdAt: contextState.summaryEvent.createdAt,
-								position: boundaryIndex >= 0 ? "before" : "after",
+								position: "after",
 							}
 						: undefined,
 				attachments: r.attachments.length ? r.attachments : undefined,
 				skillInvocation: r.skillInvocation,
-				isStale: r.status === "generating" && !r.isActive,
-				forceStop:
-					r.status === "generating" && !r.isActive
-						? () => forceStopStaleTurn(r.id)
-						: undefined,
 			})),
 		);
 		return rows;
-	}, [conversationId, forceStopStaleTurn]);
+	}, [conversationId]);
 	loadHistoryRef.current = async () => {
 		await loadHistory();
 	};
@@ -284,7 +274,7 @@ export function useSolarRuntime(
 	const streamTurn = useCallback(
 		async (url: string, body: Record<string, unknown>) => {
 			const abort = new AbortController();
-			const displayId = crypto.randomUUID();
+			const displayId = newId();
 			abortRef.current = abort;
 			const request = fetch(url, {
 				method: "POST",
@@ -351,7 +341,7 @@ export function useSolarRuntime(
 			setMessages((prev) => [
 				...prev,
 				{
-					id: crypto.randomUUID(),
+					id: newId(),
 					role: "user",
 					content: text,
 					skillInvocation: command.skillName

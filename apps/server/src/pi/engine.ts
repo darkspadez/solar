@@ -1,0 +1,635 @@
+/**
+ * PiChatEngine — the pi-engine equivalents of chat/v2Live's send/edit/
+ * regenerate/stop: Solar sends (or replaces) a user message as a pi prompt
+ * against the conversation's own process (PiSessionManager), translates the
+ * live JsonAgentSessionEvent stream into Solar's existing UiChunk SSE
+ * contract (PiGenerationRegistry), and leaves all message persistence to the
+ * child's SessionManager (plan: Core principle — pi's JSONL is canonical).
+ *
+ * Edit/regenerate are pi-style sibling branches (plan: Current seams): branch
+ * to the target's parent, then prompt again — the abandoned path stays on
+ * disk, inert and recoverable; the UI renders only the current path.
+ */
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import {
+	SessionManager,
+	type RpcClient,
+	type SessionMessageEntry,
+} from "@earendil-works/pi-coding-agent";
+import {
+	renderBuiltinPromptInterpolations,
+	type UserLocation,
+} from "../chat/builtins";
+import {
+	getTitlePrompt,
+	resolveSelection,
+	resolveTaskModelOrFallback,
+	type ModelSelection,
+} from "../chat/catalog";
+import { generatePiTitleText } from "./titles";
+import type { ResolvedTool } from "../chat/mcp";
+import {
+	listExposedSkills,
+	skillCatalogContext,
+	skillInvocationContext,
+} from "../chat/skills";
+import { chatV2Repository } from "../chat-v2/db/repository";
+import { db } from "../db";
+import { logger } from "../logger";
+import { peekResolvedTools } from "./bridge/server";
+import { piConfig, piSessionDir } from "./config";
+import { piGenerations, type PiGeneration } from "./generation";
+import { piSessionManager } from "./manager";
+import {
+	attachmentMarker,
+	importConversation,
+	isPiSessionReady,
+	piSessionFile,
+} from "./migration";
+import { piProviderId } from "./models";
+
+/** Solar-owned framing; pi's coding-agent default system prompt is never used. */
+const SOLAR_DEFAULT_SYSTEM_PROMPT =
+	"You are a helpful assistant in Solar, a general-purpose chat application. " +
+	"Answer clearly and concisely, cite sources you used (links are fine), and " +
+	"explain tool usage at a level a non-technical user understands.";
+
+export interface PiTurnInput {
+	userId: string;
+	isAdmin: boolean;
+	conversationId: string;
+	userLocation?: UserLocation;
+}
+
+export interface PiSendMessageInput extends PiTurnInput {
+	text: string;
+	attachmentIds?: string[];
+	skillName?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Shared turn plumbing
+
+async function resolveTurn(input: PiTurnInput) {
+	const conversation = await chatV2Repository.getConversation(
+		input.userId,
+		input.conversationId,
+	);
+	const selection = await resolveSelection(
+		{
+			provider: conversation.provider ?? undefined,
+			endpointId: conversation.endpointId ?? undefined,
+			modelId: conversation.modelId ?? undefined,
+			api: conversation.modelApi ?? undefined,
+		},
+		input.userId,
+		input.isAdmin,
+	);
+	if (piGenerations.isConversationGenerating(input.conversationId)) {
+		throw new Error("conversation is already generating");
+	}
+	return { conversation, selection };
+}
+
+function thinkingLevelOf(conversation: {
+	reasoningEffort?: string | null;
+}): ThinkingLevel {
+	return (conversation.reasoningEffort ?? "off") as ThinkingLevel;
+}
+
+async function acquireForTurn(
+	input: PiTurnInput,
+	conversation: Awaited<ReturnType<typeof resolveTurn>>["conversation"],
+	selection: ModelSelection,
+) {
+	const skills = await listExposedSkills(input.userId);
+	const systemPrompt =
+		renderBuiltinPromptInterpolations(
+			conversation.systemPrompt,
+			input.userLocation,
+		) ?? SOLAR_DEFAULT_SYSTEM_PROMPT;
+	const session = await piSessionManager.acquire({
+		identity: {
+			conversationId: input.conversationId,
+			userId: input.userId,
+			userLocation: input.userLocation,
+		},
+		systemPrompt,
+		appendSystemPrompt: skillCatalogContext(skills) ?? undefined,
+		bridgeUrl: `http://127.0.0.1:${process.env.PORT ?? 3000}`,
+		provider: piProviderId(selection),
+		modelId: selection.modelId,
+		onExit: (conversationId) =>
+			piGenerations.interruptAllForConversation(
+				conversationId,
+				"generation process exited unexpectedly",
+			),
+	});
+	// Model/thinking are turn-scoped RPC commands — cheap roundtrips, always
+	// re-asserted so a reused (previously idle) process is reconfigured.
+	await session.client.setModel(piProviderId(selection), selection.modelId);
+	await session.client.setThinkingLevel(thinkingLevelOf(conversation));
+	session.generating = true;
+	return session;
+}
+
+// ---------------------------------------------------------------------------
+// Stream pump: pi session events → UiChunk generation contract
+
+interface PumpOptions {
+	conversationId: string;
+	userText: string;
+}
+
+function pumpGeneration(
+	generation: PiGeneration,
+	client: RpcClient,
+	options: PumpOptions,
+): Promise<void> {
+	return new Promise((resolve) => {
+		const toolDisplayNames = new Map(
+			(peekResolvedTools(options.conversationId) ?? []).map(
+				(tool: ResolvedTool) => [
+					tool.tool.name,
+					{ serverName: tool.serverName, remoteName: tool.remoteName },
+				],
+			),
+		);
+		const usage = { inputTokens: 0, outputTokens: 0 };
+		let lastActivity = Date.now();
+		let stopRequested = false;
+		let abortGrace: ReturnType<typeof setTimeout> | null = null;
+		let settled = false;
+		let stallTimer: ReturnType<typeof setInterval>;
+
+		const finish = (ok: boolean, errorText?: string) => {
+			if (settled) return;
+			settled = true;
+			if (abortGrace) clearTimeout(abortGrace);
+			clearInterval(stallTimer);
+			if (ok) {
+				piGenerations.emit(generation, {
+					type: "finish",
+					finishReason: stopRequested ? "stop" : "stop",
+					usage,
+				});
+				piGenerations.finish(generation, "done");
+			} else {
+				piGenerations.emit(generation, {
+					type: "error",
+					errorText: errorText ?? "generation failed",
+				});
+				piGenerations.finish(generation, "error");
+			}
+			const session = piSessionManager.get(generation.conversationId);
+			if (session) {
+				session.generating = false;
+				session.lastActivityAt = Date.now();
+			}
+			resolve();
+		};
+
+		generation.onStop = async () => {
+			stopRequested = true;
+			await client.abort().catch(() => {});
+		};
+
+		// Stall watchdog (plan: Watchdog): reset on every inbound event; lapse →
+		// abort, grace for agent_settled, then kill.
+		stallTimer = setInterval(() => {
+			if (Date.now() - lastActivity < piConfig.stallTimeoutMs) return;
+			lastActivity = Date.now();
+			logger
+				.withMetadata({
+					conversationId: generation.conversationId,
+					generationId: generation.id,
+				})
+				.warn("pi generation stalled; aborting");
+			void client
+				.abort()
+				.catch(() => {})
+				.finally(() => {
+					abortGrace = setTimeout(() => {
+						void piSessionManager
+							.drop(generation.conversationId)
+							.catch(() => {});
+						finish(false, "generation stalled and was aborted");
+					}, piConfig.abortGraceMs);
+				});
+		}, Math.min(piConfig.stallTimeoutMs, 5_000));
+		stallTimer.unref?.();
+
+		client.onEvent((event) => {
+			lastActivity = Date.now();
+			try {
+				if (event.type === "message_update") {
+					const inner = event.assistantMessageEvent;
+					switch (inner.type) {
+						case "text_delta":
+							piGenerations.emit(generation, {
+								type: "text-delta",
+								textDelta: inner.delta,
+							});
+							break;
+						case "thinking_delta":
+							piGenerations.emit(generation, {
+								type: "reasoning-delta",
+								delta: inner.delta,
+							});
+							break;
+						case "done":
+							usage.inputTokens += inner.message.usage.input;
+							usage.outputTokens += inner.message.usage.output;
+							break;
+						case "error":
+							finish(false, inner.error.errorMessage);
+							break;
+					}
+				} else if (event.type === "tool_execution_start") {
+					// pi's JSON protocol strips partial assistant snapshots (no
+					// per-token tool-call arg streaming at this layer), so Solar's UI
+					// contract is served from the execution events instead: start +
+					// full args + end on execution start, result on execution end.
+					piGenerations.emit(generation, {
+						type: "tool-call-start",
+						toolCallId: event.toolCallId,
+						toolName: event.toolName,
+						...toolDisplayNames.get(event.toolName),
+					});
+					piGenerations.emit(generation, {
+						type: "tool-call-delta",
+						toolCallId: event.toolCallId,
+						argsText: JSON.stringify(event.args ?? {}),
+					});
+					piGenerations.emit(generation, {
+						type: "tool-call-end",
+						toolCallId: event.toolCallId,
+					});
+				} else if (event.type === "tool_execution_end") {
+					const result = event.result as
+						| { content?: Array<{ type: string; text?: string }> }
+						| undefined;
+					const output = (result?.content ?? [])
+						.filter((part) => part.type === "text")
+						.map((part) => part.text ?? "")
+						.join("\n");
+					piGenerations.emit(generation, {
+						type: "tool-call-result",
+						toolCallId: event.toolCallId,
+						output: output || (event.isError ? "Tool failed." : "Done."),
+						isError: event.isError,
+					});
+				} else if (event.type === "agent_settled") {
+					finish(true);
+				}
+				// agent_end(willRetry=true) stays running; auto_retry_* events only
+				// reset the stall watchdog. agent_settled is the terminal signal.
+			} catch (error) {
+				finish(false, error instanceof Error ? error.message : String(error));
+			}
+		});
+
+		client.prompt(options.userText).catch((error) => {
+			finish(false, error instanceof Error ? error.message : String(error));
+		});
+	});
+}
+
+// ---------------------------------------------------------------------------
+// Public engine API (mirrors chat/v2Live's entry points)
+
+export async function piSendMessage(
+	input: PiSendMessageInput,
+	options?: { skipImport?: boolean },
+): Promise<string> {
+	const { conversation, selection } = await resolveTurn(input);
+	if (!options?.skipImport && !isPiSessionReady(input.conversationId)) {
+		await importConversation(input.userId, input.conversationId);
+	}
+	const isFirstMessage = conversationIsEmpty(input.conversationId);
+
+	const skills = input.skillName
+		? await listExposedSkills(input.userId)
+		: null;
+	const skill = skills?.find((candidate) => candidate.name === input.skillName);
+	if (input.skillName && !skill) throw new Error("skill not found");
+
+	const userText = withAttachments(
+		skill
+			? `${input.text}${skillInvocationContext({ name: skill.name, content: skill.content })}`
+			: input.text,
+		input.attachmentIds,
+	);
+
+	const generation = piGenerations.start({
+		conversationId: input.conversationId,
+		userId: input.userId,
+	});
+	generate(generation, input, conversation, selection, userText, [], isFirstMessage);
+	return generation.id;
+}
+
+function generate(
+	generation: PiGeneration,
+	input: PiTurnInput,
+	conversation: Awaited<ReturnType<typeof resolveTurn>>["conversation"],
+	selection: ModelSelection,
+	userText: string,
+	attachmentIds: string[] = [],
+	isFirstMessage = false,
+): void {
+	void (async () => {
+		const session = await acquireForTurn(input, conversation, selection);
+		await pumpGeneration(generation, session.client, {
+			conversationId: input.conversationId,
+			userText,
+		});
+		if (generation.status === "done") {
+			const userEntryId = await findLatestUserEntryId(
+				input.conversationId,
+				userText,
+			);
+			if (attachmentIds.length && userEntryId) {
+				await db
+					.insertInto("v2_message_attachment")
+					.values(
+						attachmentIds.map((attachmentId, index) => ({
+							messageId: userEntryId,
+							attachmentId,
+							ordinal: index,
+						})),
+					)
+					.onConflict((oc) => oc.doNothing())
+					.execute();
+			}
+			await touchConversation(input.conversationId);
+			if (isFirstMessage)
+				await generatePiTitle(generation, input, selection, userText);
+		}
+	})().catch((error) => {
+		logger
+			.withError(error)
+			.withMetadata({ conversationId: input.conversationId })
+			.error("pi generation failed");
+		if (generation.status === "running") {
+			piGenerations.emit(generation, {
+				type: "error",
+				errorText: error instanceof Error ? error.message : String(error),
+			});
+			piGenerations.finish(generation, "error");
+		}
+	});
+}
+
+// ---------------------------------------------------------------------------
+// Edit / regenerate — sibling branches over pi's own tree
+
+export interface PiEditInput extends PiTurnInput {
+	targetTurnId: string; // pi entry id of the user message being replaced
+	text: string;
+	attachmentIds?: string[];
+}
+
+/**
+ * Edit/regenerate mechanics (plan: Current seams): the pi process owns the
+ * session entirely while it runs, so Solar can't and shouldn't edit JSONL
+ * behind its back. Instead edits go to the process as a `/solar-reprompt`
+ * extension command: the extension moves the tree pointer (navigateTree) to
+ * the target's parent and sends the new/edited text — the abandoned path
+ * stays on disk, inert (plan decision: no destructiveness, no switcher UI).
+ */
+async function piReprompt(
+	input: PiTurnInput,
+	conversation: Awaited<ReturnType<typeof resolveTurn>>["conversation"],
+	selection: ModelSelection,
+	parentEntryId: string,
+	text: string,
+	attachmentIds?: string[],
+): Promise<string> {
+	const generation = piGenerations.start({
+		conversationId: input.conversationId,
+		userId: input.userId,
+	});
+	const payload = JSON.stringify({
+		parentEntryId,
+		text: withAttachments(text, attachmentIds),
+	});
+	generate(
+		generation,
+		input,
+		conversation,
+		selection,
+		`/solar-reprompt ${payload}`,
+		attachmentIds ?? [],
+	);
+	return generation.id;
+}
+
+export async function piEditUserMessage(input: PiEditInput): Promise<string> {
+	const { conversation, selection } = await resolveTurn(input);
+	const manager = openSession(input.conversationId);
+	const target = manager.getEntry(input.targetTurnId);
+	if (!target || target.type !== "message") throw new Error("message not found");
+	// Root-of-tree edits (first message, no parent) restart the conversation:
+	// navigateTree has no "reset to null" target, and chat-v2 discarded
+	// everything after the edited message anyway. skipImport: the conversation
+	// already lives on pi (nothing to import from chat-v2).
+	if (target.parentId === null) {
+		await piDeleteConversation(input.conversationId);
+		return piSendMessage(
+			{ ...input, attachmentIds: input.attachmentIds ?? [] },
+			{ skipImport: true },
+		);
+	}
+	return piReprompt(
+		input,
+		conversation,
+		selection,
+		target.parentId,
+		input.text,
+		input.attachmentIds,
+	);
+}
+
+export async function piRegenerateAssistantTurn(
+	input: PiTurnInput & { targetTurnId: string },
+): Promise<string> {
+	const { conversation, selection } = await resolveTurn(input);
+	const manager = openSession(input.conversationId);
+	const path = manager.getBranch();
+	const targetIndex = path.findIndex((entry) => entry.id === input.targetTurnId);
+	if (targetIndex < 0) throw new Error("message not found");
+	// assistant-ui's onReload may pass the assistant entry or its parent user
+	// entry; both resolve to "the user prompt to re-answer".
+	const target = path[targetIndex] as SessionMessageEntry;
+	let userIndex = targetIndex;
+	if (target.type !== "message" || target.message.role !== "user") {
+		userIndex = targetIndex - 1;
+		while (
+			userIndex >= 0 &&
+			(path[userIndex]!.type !== "message" ||
+				(path[userIndex] as SessionMessageEntry).message.role !== "user")
+		)
+			userIndex--;
+	}
+	const userEntry =
+		userIndex >= 0 && path[userIndex]!.type === "message"
+			? (path[userIndex] as SessionMessageEntry)
+			: null;
+	if (!userEntry || userEntry.message.role !== "user") {
+		throw new Error("no user message to regenerate from");
+	}
+	const rawText =
+		typeof userEntry.message.content === "string"
+			? userEntry.message.content
+			: (userEntry.message.content as Array<{ type: string; text?: string }>)
+					.filter((part) => part.type === "text")
+					.map((part) => part.text ?? "")
+					.join("\n");
+
+	if (userEntry.parentId === null) {
+		// Root-prompt regeneration restarts the (single-turn) conversation.
+		await piDeleteConversation(input.conversationId);
+		return piSendMessage(
+			{ ...input, text: rawText, attachmentIds: [] },
+			{ skipImport: true },
+		);
+	}
+	return piReprompt(
+		input,
+		conversation,
+		selection,
+		userEntry.parentId,
+		rawText,
+	);
+}
+
+// ---------------------------------------------------------------------------
+// Stop / stream / ownership
+
+export async function piStopGeneration(
+	userId: string,
+	generationId: string,
+): Promise<boolean> {
+	if (!piGenerations.owns(userId, generationId)) return false;
+	return piGenerations.stop(generationId);
+}
+
+export function piStream(
+	generationId: string,
+	lastEventId: number,
+): ReadableStream<Uint8Array> {
+	return piGenerations.subscribe(generationId, lastEventId);
+}
+
+/** conversation.compact for pi conversations: pi compacts in its own process. */
+export async function piCompact(input: PiTurnInput): Promise<void> {
+	const { conversation, selection } = await resolveTurn(input);
+	if (!isPiSessionReady(input.conversationId)) {
+		throw new Error("conversation is not on the pi engine");
+	}
+	const session = await acquireForTurn(input, conversation, selection);
+	try {
+		await session.client.compact();
+	} finally {
+		session.generating = false;
+		session.lastActivityAt = Date.now();
+	}
+}
+
+/** conversation.remove for pi conversations: kill the child + drop the files. */
+export async function piDeleteConversation(conversationId: string): Promise<void> {
+	await piSessionManager.drop(conversationId);
+	const dir = piSessionDir(conversationId);
+	try {
+		const { rmSync } = await import("node:fs");
+		rmSync(dir, { recursive: true, force: true });
+	} catch {
+		// never block deletion of metadata on file cleanup
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+
+function openSession(conversationId: string) {
+	const file = piSessionFile(conversationId);
+	if (!file) throw new Error("conversation has no pi session");
+	return SessionManager.open(file, piSessionDir(conversationId));
+}
+
+async function findLatestUserEntryId(
+	conversationId: string,
+	_userText: string,
+): Promise<string | null> {
+	try {
+		const manager = openSession(conversationId);
+		const messages = manager
+			.getEntries()
+			.filter(
+				(entry): entry is SessionMessageEntry => entry.type === "message",
+			);
+		for (let index = messages.length - 1; index >= 0; index--) {
+			if (messages[index]!.message.role === "user") return messages[index]!.id;
+		}
+	} catch {
+		// best effort
+	}
+	return null;
+}
+
+function withAttachments(text: string, attachmentIds?: string[]): string {
+	if (!attachmentIds?.length) return text;
+	const marker = attachmentMarker(attachmentIds);
+	return text ? `${text}\n${marker}` : marker;
+}
+
+function conversationIsEmpty(conversationId: string): boolean {
+	try {
+		return (
+			openSession(conversationId)
+				.getEntries()
+				.filter((entry) => entry.type === "message").length === 0
+		);
+	} catch {
+		return true;
+	}
+}
+
+async function generatePiTitle(
+	generation: PiGeneration,
+	input: PiTurnInput,
+	selection: ModelSelection,
+	userText: string,
+): Promise<void> {
+	try {
+		const taskSelection = await resolveTaskModelOrFallback(selection);
+		const title = await generatePiTitleText(
+			userText,
+			await getTitlePrompt(),
+			taskSelection,
+		);
+		if (!title) return;
+		piGenerations.emit(generation, { type: "title-update", title });
+		const session = piSessionManager.get(input.conversationId);
+		if (session && !session.generating) {
+			await session.client.setSessionName(title).catch(() => {});
+			return;
+		}
+		openSession(input.conversationId).appendSessionInfo(title);
+	} catch (error) {
+		logger
+			.withError(error)
+			.withMetadata({ conversationId: input.conversationId })
+			.warn("pi title generation failed");
+	}
+}
+
+async function touchConversation(conversationId: string): Promise<void> {
+	await db
+		.updateTable("v2_conversation")
+		.set({ updatedAt: new Date().toISOString() })
+		.where("id", "=", conversationId)
+		.execute()
+		.catch(() => {});
+}

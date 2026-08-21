@@ -1,7 +1,5 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
 import { createV2TestDatabase } from "../chat-v2/db/fixtures";
-import { zeroUsage } from "../chat-v2/validation";
 
 const USER_ID = "context-user";
 const database = await createV2TestDatabase();
@@ -18,9 +16,6 @@ mock.module("../chat/attachments", () => ({
 	deleteAttachmentFilesForUser: async () => {},
 	deleteAttachmentFilesByStorageKey: async () => {},
 	expandAttachmentRows: async () => ({ parts: [], documents: [] }),
-}));
-mock.module("../chat/generationManager", () => ({
-	generationManager: { isActive: () => false },
 }));
 mock.module("../logger", () => ({
 	logger: {
@@ -70,54 +65,13 @@ mock.module("../chat/catalog", () => ({
 	setTitlePrompt: async () => {},
 	importProviderModels: async () => {},
 	loadProviderConfigs: async () => [],
+	normalizeBaseUrlForApi: () => "",
 }));
 
 const { appRouter } = await import("./router");
-const { chatV2Repository } = await import("../chat/v2Live");
+const { chatV2Repository } = await import("../chat-v2/db/repository");
 const { DEFAULT_CONTEXT_GLOBAL_SETTINGS, parseContextGlobalSettings } =
 	await import("../context/settings");
-
-function assistant(text: string): AssistantMessage {
-	return {
-		role: "assistant",
-		content: [{ type: "text", text }],
-		timestamp: Date.now(),
-		provider: "mock",
-		api: "openai-completions",
-		model: "mock",
-		usage: zeroUsage(),
-		stopReason: "stop",
-	};
-}
-
-async function seedCompactableConversation(conversationId: string) {
-	await chatV2Repository.createConversation(USER_ID, { id: conversationId, title: "Chat" });
-	const messages: Message[] = [
-		{ role: "user", content: "first", timestamp: 1 },
-		assistant("first reply"),
-		{ role: "user", content: "second", timestamp: 2 },
-		assistant("second reply"),
-		{ role: "user", content: "third", timestamp: 3 },
-		assistant("third reply"),
-	];
-	for (const [ordinal, message] of messages.entries()) {
-		const turnId = `turn-${ordinal}`;
-		await chatV2Repository.createTurn(USER_ID, conversationId, {
-			id: turnId,
-			ordinal,
-			role: message.role === "user" ? "user" : "assistant",
-			origin: "text",
-			status: "complete",
-		});
-		await chatV2Repository.appendCanonicalMessages(USER_ID, conversationId, [{
-			id: `message-${ordinal}`,
-			turnId,
-			message,
-			origin: "text",
-			status: "complete",
-		}]);
-	}
-}
 
 describe("context management metadata", () => {
 	afterEach(async () => {
@@ -160,7 +114,7 @@ describe("context management metadata", () => {
 		);
 	});
 
-	test("returns idle context status for a conversation with no compactions", async () => {
+	test("returns idle context status for a conversation with no pi session", async () => {
 		const conversation = await chatV2Repository.createConversation(USER_ID, { title: "Chat" });
 		const caller = appRouter.createCaller({ user: { id: USER_ID } } as never);
 
@@ -173,68 +127,6 @@ describe("context management metadata", () => {
 			jobError: null,
 			summaryEvent: null,
 		});
-	});
-
-	test("reports a summarized context status once a compaction is manually created", async () => {
-		const conversationId = "compactable-conversation";
-		await seedCompactableConversation(conversationId);
-		const caller = appRouter.createCaller({ user: { id: USER_ID } } as never);
-
-		await caller.conversation.compact({ conversationId });
-
-		const status = await caller.conversation.contextState({ conversationId });
-		expect(status.state).toBe("idle");
-		expect(status.summarized).toBe(true);
-		expect(status.summaryEvent).not.toBeNull();
-		expect(status.summaryEvent?.retainedMessageBoundaryId).toBe("turn-4");
-	});
-	test("successfully manually compacts when messages.length - 3 falls on a tool call", async () => {
-		const conversationId = "tool-compact-conversation";
-		await chatV2Repository.createConversation(USER_ID, { id: conversationId, title: "Tool Chat" });
-		const messages: Message[] = [
-			{ role: "user", content: "first query", timestamp: 1 },
-			assistant("first reply"),
-			{ role: "user", content: "second query", timestamp: 2 },
-			{
-				role: "assistant",
-				content: [{ type: "toolCall", id: "tool-1", name: "search", arguments: {} }],
-				timestamp: 3,
-				provider: "mock",
-				api: "openai-completions",
-				model: "mock",
-				usage: zeroUsage(),
-				stopReason: "toolUse",
-			},
-			{
-				role: "toolResult",
-				toolCallId: "tool-1",
-				toolName: "search",
-				content: [{ type: "text", text: "search output" }],
-				isError: false,
-				timestamp: 4,
-			},
-			assistant("third reply"),
-		];
-		for (const [ordinal, message] of messages.entries()) {
-			const turnId = `turn-${ordinal}`;
-			await chatV2Repository.createTurn(USER_ID, conversationId, {
-				id: turnId,
-				ordinal,
-				role: message.role === "user" ? "user" : "assistant",
-				origin: "text",
-				status: "complete",
-			});
-			await chatV2Repository.appendCanonicalMessages(USER_ID, conversationId, [{
-				id: `message-${ordinal}`,
-				turnId,
-				message,
-				origin: "text",
-				status: "complete",
-			}]);
-		}
-
-		const caller = appRouter.createCaller({ user: { id: USER_ID } } as never);
-		await expect(caller.conversation.compact({ conversationId })).resolves.toEqual({ success: true });
 	});
 
 	test("rejects context status for a conversation the user does not own", async () => {

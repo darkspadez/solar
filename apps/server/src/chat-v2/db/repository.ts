@@ -2283,3 +2283,7 @@ export class ChatV2Repository {
 		return record as ContextCompactionJobRecord;
 	}
 }
+
+/** Process-wide repository handle (moved here from chat/v2Live.ts). */
+import { db } from "../../db";
+export const chatV2Repository = new ChatV2Repository(db);

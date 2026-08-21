@@ -1,18 +1,17 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { getSolarSession } from "../auth";
-import { generationManager } from "./generationManager";
-import { reverseGeocode } from "./location";
+import { chatV2Repository } from "../chat-v2/db/repository";
 import {
-	chatV2Repository,
-	editUserMessage,
-	ownsAssistantTurn,
-	ownsConversation,
-	ownsUserTurn,
-	regenerateAssistantTurn,
-	sendMessage,
-	stopGeneration,
-} from "./v2Live";
+	piEditUserMessage,
+	piRegenerateAssistantTurn,
+	piSendMessage,
+	piStopGeneration,
+	piStream,
+} from "../pi/engine";
+import { piGenerations } from "../pi/generation";
+import { piFindEntryOwner } from "../pi/turns";
+import { reverseGeocode } from "./location";
 import { SKILL_NAME_PATTERN } from "./skills";
 
 export const chatRoutes = new Hono();
@@ -85,7 +84,20 @@ function parseUserLocation(value: unknown): UserLocation | undefined {
 		: undefined;
 }
 
-// Send a message: persist user turn, start a decoupled generation, stream it.
+async function ownsConversation(
+	userId: string,
+	conversationId: string,
+): Promise<boolean> {
+	try {
+		await chatV2Repository.getConversation(userId, conversationId);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+// Send a message: append the user turn, start a decoupled generation in the
+// conversation's pi process, stream it via the returned messageId's SSE.
 chatRoutes.post("/", async (c) => {
 	const user = await requireUser(c.req.raw);
 	if (!user) return c.json({ error: "unauthorized" }, 401);
@@ -96,8 +108,7 @@ chatRoutes.post("/", async (c) => {
 	} catch {
 		return c.json({ error: "invalid request body" }, 400);
 	}
-	const { conversationId, text, attachmentIds, userLocation, skillName } =
-		input;
+	const { conversationId, text, attachmentIds, userLocation, skillName } = input;
 	if (!text.trim() && !attachmentIds?.length && !skillName) {
 		return c.json(
 			{ error: "conversationId and text or an attachment are required" },
@@ -107,14 +118,15 @@ chatRoutes.post("/", async (c) => {
 	if (!(await ownsConversation(user.id, conversationId)))
 		return c.json({ error: "conversation not found" }, 404);
 	try {
-		const messageId = await sendMessage({
+		const location = await reverseGeocode(parseUserLocation(userLocation));
+		const messageId = await piSendMessage({
 			userId: user.id,
 			isAdmin: user.isAdmin,
 			conversationId,
 			text,
 			attachmentIds,
 			skillName,
-			userLocation: await reverseGeocode(parseUserLocation(userLocation)),
+			userLocation: location,
 		});
 		return c.json({ messageId }, 202);
 	} catch (error) {
@@ -124,8 +136,8 @@ chatRoutes.post("/", async (c) => {
 	}
 });
 
-// Edit a user message: rewrite its text, discard everything after it, and
-// regenerate the assistant reply from the amended history.
+// Edit a user message: branch the pi session at the target's parent and send
+// the amended prompt (the abandoned path stays on disk, inert).
 chatRoutes.post("/edit", async (c) => {
 	const user = await requireUser(c.req.raw);
 	if (!user) return c.json({ error: "unauthorized" }, 401);
@@ -138,13 +150,12 @@ chatRoutes.post("/edit", async (c) => {
 	if (!messageId || !text?.trim()) {
 		return c.json({ error: "messageId and text are required" }, 400);
 	}
-	if (!(await ownsUserTurn(user.id, messageId)))
-		return c.json({ error: "message not found" }, 404);
-	const turn = await chatV2Repository.getTurn(user.id, messageId);
-	const assistantMessageId = await editUserMessage({
+	const owner = await piFindEntryOwner(user.id, messageId);
+	if (owner?.role !== "user") return c.json({ error: "message not found" }, 404);
+	const assistantMessageId = await piEditUserMessage({
 		userId: user.id,
 		isAdmin: user.isAdmin,
-		conversationId: turn.conversationId,
+		conversationId: owner.conversationId,
 		targetTurnId: messageId,
 		text,
 		userLocation: await reverseGeocode(parseUserLocation(userLocation)),
@@ -152,10 +163,8 @@ chatRoutes.post("/edit", async (c) => {
 	return c.json({ messageId: assistantMessageId }, 202);
 });
 
-// Regenerate a reply. `messageId` may be the assistant message to replace
-// (discard it and anything after) or its parent user message (assistant-ui's
-// onReload passes the parent — discard everything after it). Either way, a
-// fresh reply is generated from the resulting history.
+// Regenerate a reply. assistant-ui's onReload passes either the assistant
+// entry or its parent user entry; the engine accepts both.
 chatRoutes.post("/regenerate", async (c) => {
 	const user = await requireUser(c.req.raw);
 	if (!user) return c.json({ error: "unauthorized" }, 401);
@@ -165,24 +174,13 @@ chatRoutes.post("/regenerate", async (c) => {
 		userLocation?: unknown;
 	};
 	if (!messageId) return c.json({ error: "messageId required" }, 400);
-	let turn: Awaited<ReturnType<typeof chatV2Repository.getTurn>>;
-	try {
-		const requested = await chatV2Repository.getTurn(user.id, messageId);
-		turn =
-			requested.role === "assistant"
-				? requested
-				: await chatV2Repository.getAssistantTurnForUserTurn(
-						user.id,
-						messageId,
-					);
-	} catch {
-		return c.json({ error: "message not found" }, 404);
-	}
-	const assistantMessageId = await regenerateAssistantTurn({
+	const owner = await piFindEntryOwner(user.id, messageId);
+	if (!owner) return c.json({ error: "message not found" }, 404);
+	const assistantMessageId = await piRegenerateAssistantTurn({
 		userId: user.id,
 		isAdmin: user.isAdmin,
-		conversationId: turn.conversationId,
-		targetTurnId: turn.id,
+		conversationId: owner.conversationId,
+		targetTurnId: messageId,
 		userLocation: await reverseGeocode(parseUserLocation(userLocation)),
 	});
 	return c.json({ messageId: assistantMessageId }, 202);
@@ -195,10 +193,10 @@ chatRoutes.get("/stream", async (c) => {
 
 	const messageId = c.req.query("messageId");
 	if (!messageId) return c.json({ error: "messageId required" }, 400);
-	if (!(await ownsAssistantTurn(user.id, messageId)))
+	if (!piGenerations.owns(user.id, messageId))
 		return c.json({ error: "message not found" }, 404);
 	return new Response(
-		generationManager.subscribe(
+		piStream(
 			messageId,
 			Number(c.req.header("last-event-id") ?? c.req.query("lastEventId") ?? 0),
 		),
@@ -213,21 +211,15 @@ chatRoutes.post("/stop", async (c) => {
 
 	const { messageId } = (await c.req.json()) as { messageId: string };
 	if (!messageId) return c.json({ error: "messageId required" }, 400);
-	if (!(await ownsAssistantTurn(user.id, messageId)))
-		return c.json({ error: "message not found" }, 404);
-	return c.json({ stopped: await stopGeneration(user.id, messageId) });
+	return c.json({ stopped: await piStopGeneration(user.id, messageId) });
 });
 
-// Finalize an orphaned assistant placeholder after a process restart or failed
-// generation teardown. Active generations still use the normal Stop path so
-// their buffered output is persisted by the generation manager.
+// force-stop is the same stop under pi (no orphaned placeholders exist).
 chatRoutes.post("/force-stop", async (c) => {
 	const user = await requireUser(c.req.raw);
 	if (!user) return c.json({ error: "unauthorized" }, 401);
 
 	const { messageId } = (await c.req.json()) as { messageId: string };
 	if (!messageId) return c.json({ error: "messageId required" }, 400);
-	if (!(await ownsAssistantTurn(user.id, messageId)))
-		return c.json({ error: "message not found" }, 404);
-	return c.json({ stopped: await stopGeneration(user.id, messageId) });
+	return c.json({ stopped: await piStopGeneration(user.id, messageId) });
 });

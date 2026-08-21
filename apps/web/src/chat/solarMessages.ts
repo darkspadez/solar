@@ -47,8 +47,6 @@ export interface SolarMessage {
 	content: string;
 	createdAt?: string;
 	connectionStatus?: SolarConnectionStatus;
-	isStale?: boolean;
-	forceStop?: () => Promise<void>;
 	reasoning?: string;
 	toolCalls?: SolarToolCall[];
 	summaryEvent?: SolarSummaryEvent;
@@ -249,8 +247,6 @@ export function convertMessage(message: SolarMessage): ThreadMessageLike {
 			custom: {
 				createdAt: message.createdAt,
 				connectionStatus: message.connectionStatus,
-				isStale: message.isStale,
-				forceStop: message.forceStop,
 				toolCalls: message.toolCalls,
 				summaryEvent: message.summaryEvent,
 				skillInvocation: message.skillInvocation,
