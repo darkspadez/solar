@@ -25,14 +25,15 @@
     "migrate": "bun run --cwd apps/server migrate",
     "migrate:auth": "bun run --cwd apps/server migrate:auth",
     "codegen": " bun run --cwd apps/server codegen",
-    "deploy:staging": "bun run scripts/deploy-staging.ts",
     "typecheck": "(tsc -p apps/server/tsconfig.json && tsc -p apps/web/tsconfig.json && tsc -p packages/shared/tsconfig.json && tsc -p tsconfig.e2e.json)",
     "test": "bun run --parallel test:server test:web",
     "test:server": "bun test --parallel apps/server/src",
     "test:web": "bun run --cwd apps/web test",
     "test:e2e": "node ./node_modules/@playwright/test/cli.js test --project=chromium",
     "test:e2e:all": "node ./node_modules/@playwright/test/cli.js test",
-    "test:e2e:install": "node ./node_modules/@playwright/test/cli.js install chromium firefox webkit"
+    "test:e2e:install": "node ./node_modules/@playwright/test/cli.js install chromium firefox webkit",
+    "deploy:staging": "bun run scripts/deploy.ts staging",
+    "deploy:production": "bun run scripts/deploy.ts production"
   },
   "dependencies": {
     "@struktoai/mirage-node": "^0.0.3",

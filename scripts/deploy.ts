@@ -1,30 +1,57 @@
+/**
+ * Solar deployment. One script, two targets, configured via
+ * SOLAR_<TARGET>_* env vars (staging defaults mirror the historical
+ * deploy-staging.ts):
+ *
+ *   bun run deploy:staging      # solar-pi:staging-* images, pi-engine build
+ *   bun run deploy:production   # solar:production-* images, current prod build
+ *
+ * Both targets: build on the target's Docker context, recreate the running
+ * compose-managed service, wait for /healthz, export history, prune old tags.
+ */
 import { spawnSync } from "node:child_process";
 
-const context = process.env.SOLAR_STAGING_DOCKER_CONTEXT ?? "dolphin";
-const sshHost = process.env.SOLAR_STAGING_SSH_HOST ?? context;
-const stagingUrl = (
-	process.env.SOLAR_STAGING_URL ?? "https://solar.home.cowger.us"
-).replace(/\/$/, "");
-const containerName = process.env.SOLAR_STAGING_CONTAINER_NAME ?? "Solar";
-const imageName = process.env.SOLAR_STAGING_IMAGE_NAME ?? "solar";
-const imageRetention = Number.parseInt(
-	process.env.SOLAR_STAGING_IMAGE_RETAIN ?? "3",
-	10,
-);
-const healthTimeout = Number.parseInt(
-	process.env.SOLAR_STAGING_HEALTH_TIMEOUT ?? "60",
-	10,
-);
-const targetPlatform =
-	process.env.SOLAR_STAGING_TARGET_PLATFORM ?? "linux/amd64";
+type Target = "production" | "staging";
+
+const TARGET: | Target
+	| undefined = Bun.argv[2] as Target | undefined;
+if (TARGET !== "production" && TARGET !== "staging") {
+	console.error("usage: bun run scripts/deploy.ts <staging|production>");
+	process.exit(1);
+}
+
+const PREFIX = TARGET.toUpperCase();
+function env(name: string, fallback?: string): string | undefined {
+	return process.env[`SOLAR_${PREFIX}_${name}`] ?? fallback;
+}
+
+const defaults: Record<
+	Target,
+	{ imageName: string; tagPrefix: string }
+> = {
+	// Staging hosts the pi-engine build; production carries the current build.
+	staging: { imageName: "solar-pi", tagPrefix: "staging" },
+	production: { imageName: "solar", tagPrefix: "production" },
+};
+
+const { imageName: defaultImageName, tagPrefix } = defaults[TARGET];
+
+const context = env("DOCKER_CONTEXT") ?? "dolphin";
+const sshHost = env("SSH_HOST") ?? context;
+const deployUrl = (env("URL") ?? "https://solar.home.cowger.us").replace(/\/$/, "");
+const containerName = env("CONTAINER_NAME") ?? "Solar";
+const imageName = env("IMAGE_NAME") ?? defaultImageName;
+const imageRetention = Number.parseInt(env("IMAGE_RETAIN") ?? "3", 10);
+const healthTimeout = Number.parseInt(env("HEALTH_TIMEOUT") ?? "60", 10);
+const targetPlatform = env("TARGET_PLATFORM") ?? "linux/amd64";
 
 const timestamp = new Date()
 	.toISOString()
 	.replace(/[-:]/g, "")
 	.replace(/\.\d{3}Z$/, "")
 	.replace("T", "-");
-const newTag = `${imageName}:staging-${timestamp}`;
-const latestTag = `${imageName}:staging-latest`;
+const newTag = `${imageName}:${tagPrefix}-${timestamp}`;
+const latestTag = `${imageName}:${tagPrefix}-latest`;
 
 function runCommand(
 	command: string,
@@ -60,10 +87,10 @@ function shellQuote(value: string) {
 	return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
-function compose(workingDir: string, project: string) {
+function compose(workingDir: string, project: string, service: string) {
 	return runCommand("ssh", [
 		sshHost,
-		`cd ${shellQuote(workingDir)} && docker compose --project-name ${shellQuote(project)} up --detach --force-recreate solar`,
+		`cd ${shellQuote(workingDir)} && docker compose --project-name ${shellQuote(project)} up --detach --force-recreate ${shellQuote(service)}`,
 	]);
 }
 
@@ -71,10 +98,10 @@ function sleep(milliseconds: number) {
 	return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-console.log("Solar staging deploy");
+console.log(`Solar ${TARGET} deploy`);
 console.log(`  Context: ${context}`);
 console.log(`  SSH host: ${sshHost}`);
-console.log(`  URL: ${stagingUrl}`);
+console.log(`  URL: ${deployUrl}`);
 console.log(`  Container: ${containerName}`);
 console.log(`  New image: ${newTag}`);
 
@@ -88,15 +115,13 @@ let previous:
 			status: string;
 			composeWorkingDir: string;
 			composeProject: string;
+			composeService: string;
 	  }
 	| undefined;
 if (inspect.success && inspect.stdout) {
 	try {
 		const container = JSON.parse(inspect.stdout) as {
-			Config?: {
-				Image?: string;
-				Labels?: Record<string, string>;
-			};
+			Config?: { Image?: string; Labels?: Record<string, string> };
 			Image?: string;
 			State?: { Status?: string };
 		};
@@ -106,6 +131,9 @@ if (inspect.success && inspect.stdout) {
 			container.Config.Labels?.["com.docker.compose.project.working_dir"];
 		const composeProject =
 			container.Config.Labels?.["com.docker.compose.project"];
+		// Service name is read from compose metadata rather than assumed.
+		const composeService =
+			container.Config.Labels?.["com.docker.compose.service"] ?? "solar";
 		if (!composeWorkingDir || !composeProject)
 			throw new Error("missing Compose project metadata");
 		previous = {
@@ -114,11 +142,14 @@ if (inspect.success && inspect.stdout) {
 			status: container.State?.Status ?? "unknown",
 			composeWorkingDir,
 			composeProject,
+			composeService,
 		};
 		console.log(
 			`  Current image: ${previous.image} (${previous.imageId}, ${previous.status})`,
 		);
-		console.log(`  Compose project: ${composeProject} (${composeWorkingDir})`);
+		console.log(
+			`  Compose: ${composeProject} service=${composeService} (${composeWorkingDir})`,
+		);
 	} catch {
 		console.error(`\nCould not read the current image for ${containerName}.`);
 		process.exit(1);
@@ -132,13 +163,13 @@ if (!previous) {
 	process.exit(1);
 }
 
-console.log("\nBuilding on the staging host...");
+console.log("\nBuilding on the target host...");
 docker(
 	["build", "--platform", targetPlatform, "-t", newTag, "-t", latestTag, "."],
 	{ stream: true },
 );
 console.log(`\nRecreating ${containerName} through Compose...`);
-compose(previous.composeWorkingDir, previous.composeProject);
+compose(previous.composeWorkingDir, previous.composeProject, previous.composeService);
 
 const updated = docker(["inspect", "--format", "{{.Image}}", containerName], {
 	fatal: false,
@@ -153,12 +184,12 @@ if (
 }
 
 console.log(`  Image updated: ${updated.stdout}`);
-console.log(`\nWaiting for ${stagingUrl}/healthz...`);
+console.log(`\nWaiting for ${deployUrl}/healthz...`);
 let healthy = false;
 for (let elapsed = 1; elapsed <= healthTimeout; elapsed += 1) {
 	await sleep(1000);
 	try {
-		const response = await fetch(`${stagingUrl}/healthz`, {
+		const response = await fetch(`${deployUrl}/healthz`, {
 			signal: AbortSignal.timeout(5000),
 		});
 		const body = (await response.json()) as { ok?: boolean };
@@ -178,31 +209,33 @@ if (!healthy) {
 	process.exit(1);
 }
 
-const historyOutput =
-	process.env.SOLAR_STAGING_HISTORY_OUTPUT ??
-	`.staging-history/${timestamp}.json`;
-console.log(`\nExporting all staging chat history to ${historyOutput}...`);
-runCommand(
-	"bun",
-	[
-		"run",
-		"solar",
-		"history",
-		"export-all",
-		"--url",
-		stagingUrl,
-		"--output",
-		historyOutput,
-	],
-	{
-		env: {
-			...process.env,
-			SOLAR_URL: stagingUrl,
-			SOLAR_API_KEY: process.env.SOLAR_STAGING_API_KEY,
+const apiKey = env("API_KEY");
+if (apiKey) {
+	const historyOutput =
+		env("HISTORY_OUTPUT") ?? `.${TARGET}-history/${timestamp}.json`;
+	console.log(`\nExporting chat history to ${historyOutput}...`);
+	runCommand(
+		"bun",
+		[
+			"run",
+			"solar",
+			"history",
+			"export-all",
+			"--url",
+			deployUrl,
+			"--output",
+			historyOutput,
+		],
+		{
+			env: {
+				...process.env,
+				SOLAR_URL: deployUrl,
+				SOLAR_API_KEY: apiKey,
+			},
+			stream: true,
 		},
-		stream: true,
-	},
-);
+	);
+}
 
 const images = docker(["images", imageName, "--format", "{{.Tag}}"], {
 	fatal: false,
@@ -210,7 +243,7 @@ const images = docker(["images", imageName, "--format", "{{.Tag}}"], {
 if (images.success) {
 	const staleTags = images.stdout
 		.split("\n")
-		.filter((tag) => tag.startsWith("staging-") && tag !== "staging-latest")
+		.filter((tag) => tag.startsWith(`${tagPrefix}-`) && tag !== `${tagPrefix}-latest`)
 		.slice(imageRetention);
 	for (const tag of staleTags)
 		docker(["rmi", `${imageName}:${tag}`], { fatal: false });
