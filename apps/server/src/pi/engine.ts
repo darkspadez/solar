@@ -200,13 +200,21 @@ function pumpGeneration(
 		let settled = false;
 		let stallTimer: ReturnType<typeof setInterval>;
 
-		// Streaming metrics (UI display). Started/first-token times come from pi
-		// events; usage totals accumulate from every assistant message's usage.
+		// Streaming metrics (UI display). Turn scope: startedAt is fixed here at
+		// pump creation (pi replays several assistant message_start/end pairs
+		// across tool loops — a per-message clock collapses TTFT to ~0). Usage
+		// accumulates from message_end, whose message is the authoritative final
+		// one; the RPC wire never delivers the inner `done` event.
 		const metrics = {
 			startedAt: Date.now() as number | null,
 			firstTokenAt: null as number | null,
 			finishedAt: null as number | null,
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+			},
 		};
 
 		const finish = (ok: boolean, errorText?: string) => {
@@ -297,11 +305,7 @@ function pumpGeneration(
 		client.onEvent((event) => {
 			lastActivity = Date.now();
 			try {
-				if (event.type === "message_start") {
-					// A new assistant message stream: metric clock starts here.
-					const msg = event.message as { role?: string };
-					if (msg.role === "assistant") metrics.startedAt = Date.now();
-				} else if (event.type === "message_update") {
+				if (event.type === "message_update") {
 					const inner = event.assistantMessageEvent;
 					switch (inner.type) {
 						case "text_delta":
@@ -314,21 +318,32 @@ function pumpGeneration(
 									: { type: "reasoning-delta", delta: inner.delta },
 							);
 							break;
-						case "done":
-							usage.inputTokens += inner.message.usage.input;
-							usage.outputTokens += inner.message.usage.output;
-							metrics.usage.input += inner.message.usage.input;
-							metrics.usage.output += inner.message.usage.output;
-							metrics.usage.cacheRead += inner.message.usage.cacheRead ?? 0;
-							metrics.usage.cacheWrite += inner.message.usage.cacheWrite ?? 0;
-							break;
 						case "error":
 							finish(false, inner.error.errorMessage);
 							break;
 					}
 				} else if (event.type === "message_end") {
-					const msg = event.message as { role?: string };
-					if (msg.role === "assistant") metrics.finishedAt = Date.now();
+					const msg = event.message as {
+						role?: string;
+						usage?: {
+							input: number;
+							output: number;
+							cacheRead?: number;
+							cacheWrite?: number;
+						};
+					};
+					if (msg.role === "assistant") {
+						metrics.finishedAt = Date.now();
+						const u = msg.usage;
+						if (u) {
+							usage.inputTokens += u.input;
+							usage.outputTokens += u.output;
+							metrics.usage.input += u.input;
+							metrics.usage.output += u.output;
+							metrics.usage.cacheRead += u.cacheRead ?? 0;
+							metrics.usage.cacheWrite += u.cacheWrite ?? 0;
+						}
+					}
 				} else if (event.type === "tool_execution_start") {
 					// pi's JSON protocol strips partial assistant snapshots (no
 					// per-token tool-call arg streaming at this layer), so Solar's UI
