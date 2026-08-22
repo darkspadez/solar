@@ -37,6 +37,7 @@ import { chatV2Repository } from "../chat-v2/db/repository";
 import { db } from "../db";
 import { logger } from "../logger";
 import { peekResolvedTools } from "./bridge/server";
+import { loadProviderConfigs } from "../chat/catalog";
 import { piConfig, piSessionDir } from "./config";
 import { piGenerations, type PiGeneration } from "./generation";
 import { piSessionManager } from "./manager";
@@ -91,10 +92,31 @@ async function resolveTurn(input: PiTurnInput) {
 	return { conversation, selection };
 }
 
-function thinkingLevelOf(conversation: {
-	reasoningEffort?: string | null;
-}): ThinkingLevel {
-	return (conversation.reasoningEffort ?? "off") as ThinkingLevel;
+/**
+ * The thinking level Solar actually wants for this conversation: the
+ * conversation's own choice, else the allowlist entry's per-model default
+ * ("Thinking: medium" in Admin Settings), else off. Never leave this at a
+ * bare off for models with no immediate conversation setting: pi clamps the
+ * request up (`off` is unsupported on some Gemini models and they'd land on
+ * `minimal` instead of the configured default).
+ */
+async function thinkingLevelOf(options: {
+	conversation: { reasoningEffort?: string | null };
+	selection: ModelSelection;
+}): Promise<ThinkingLevel> {
+	if (options.conversation.reasoningEffort) {
+		return options.conversation.reasoningEffort as ThinkingLevel;
+	}
+	const config = (await loadProviderConfigs()).find(
+		(candidate) => candidate.provider === options.selection.provider,
+	);
+	const entry = config?.enabledModels.find(
+		(candidate) =>
+			candidate.id === options.selection.modelId &&
+			candidate.endpointId === options.selection.endpointId &&
+			candidate.api === options.selection.api,
+	);
+	return (entry?.reasoningEffort ?? "off") as ThinkingLevel;
 }
 
 async function acquireForTurn(
@@ -128,7 +150,9 @@ async function acquireForTurn(
 	// Model/thinking are turn-scoped RPC commands — cheap roundtrips, always
 	// re-asserted so a reused (previously idle) process is reconfigured.
 	await session.client.setModel(piProviderId(selection), selection.modelId);
-	await session.client.setThinkingLevel(thinkingLevelOf(conversation));
+	await session.client.setThinkingLevel(
+		await thinkingLevelOf({ conversation, selection }),
+	);
 	session.generating = true;
 	return session;
 }
@@ -141,11 +165,25 @@ interface PumpOptions {
 	userText: string;
 }
 
+export interface PiTurnMetrics {
+	ttftMs: number | null;
+	tps: number | null;
+	e2e: number | null;
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+}
+
+interface PumpResult {
+	metrics: PiTurnMetrics | null;
+}
+
 function pumpGeneration(
 	generation: PiGeneration,
 	client: RpcClient,
 	options: PumpOptions,
-): Promise<void> {
+): Promise<PumpResult> {
 	return new Promise((resolve) => {
 		const toolDisplayNames = new Map(
 			(peekResolvedTools(options.conversationId) ?? []).map(
@@ -161,6 +199,15 @@ function pumpGeneration(
 		let abortGrace: ReturnType<typeof setTimeout> | null = null;
 		let settled = false;
 		let stallTimer: ReturnType<typeof setInterval>;
+
+		// Streaming metrics (UI display). Started/first-token times come from pi
+		// events; usage totals accumulate from every assistant message's usage.
+		const metrics = {
+			startedAt: Date.now() as number | null,
+			firstTokenAt: null as number | null,
+			finishedAt: null as number | null,
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		};
 
 		const finish = (ok: boolean, errorText?: string) => {
 			if (settled) return;
@@ -186,8 +233,36 @@ function pumpGeneration(
 				session.generating = false;
 				session.lastActivityAt = Date.now();
 			}
-			resolve();
+			resolve({ metrics: resolveMetrics(metrics, ok) });
 		};
+
+		function resolveMetrics(
+			m: typeof metrics,
+			ok: boolean,
+		): PiTurnMetrics | null {
+			if (!ok || m.startedAt === null) return null;
+			const finished = m.finishedAt ?? Date.now();
+			const ttftMs =
+				m.firstTokenAt === null ? null : m.firstTokenAt - (m.startedAt as number);
+			const output = m.usage.output;
+			const tps =
+				ttftMs !== null && output > 0 && finished > (m.firstTokenAt as number)
+					? output / ((finished - (m.firstTokenAt as number)) / 1000)
+					: null;
+			const e2e =
+				output > 0 && finished > (m.startedAt as number)
+					? output / ((finished - (m.startedAt as number)) / 1000)
+					: null;
+			return {
+				ttftMs,
+				tps,
+				e2e,
+				input: m.usage.input,
+				output: m.usage.output,
+				cacheRead: m.usage.cacheRead,
+				cacheWrite: m.usage.cacheWrite,
+			};
+		}
 
 		generation.onStop = async () => {
 			stopRequested = true;
@@ -222,29 +297,38 @@ function pumpGeneration(
 		client.onEvent((event) => {
 			lastActivity = Date.now();
 			try {
-				if (event.type === "message_update") {
+				if (event.type === "message_start") {
+					// A new assistant message stream: metric clock starts here.
+					const msg = event.message as { role?: string };
+					if (msg.role === "assistant") metrics.startedAt = Date.now();
+				} else if (event.type === "message_update") {
 					const inner = event.assistantMessageEvent;
 					switch (inner.type) {
 						case "text_delta":
-							piGenerations.emit(generation, {
-								type: "text-delta",
-								textDelta: inner.delta,
-							});
-							break;
 						case "thinking_delta":
-							piGenerations.emit(generation, {
-								type: "reasoning-delta",
-								delta: inner.delta,
-							});
+							if (!metrics.firstTokenAt) metrics.firstTokenAt = Date.now();
+							piGenerations.emit(
+								generation,
+								inner.type === "text_delta"
+									? { type: "text-delta", textDelta: inner.delta }
+									: { type: "reasoning-delta", delta: inner.delta },
+							);
 							break;
 						case "done":
 							usage.inputTokens += inner.message.usage.input;
 							usage.outputTokens += inner.message.usage.output;
+							metrics.usage.input += inner.message.usage.input;
+							metrics.usage.output += inner.message.usage.output;
+							metrics.usage.cacheRead += inner.message.usage.cacheRead ?? 0;
+							metrics.usage.cacheWrite += inner.message.usage.cacheWrite ?? 0;
 							break;
 						case "error":
 							finish(false, inner.error.errorMessage);
 							break;
 					}
+				} else if (event.type === "message_end") {
+					const msg = event.message as { role?: string };
+					if (msg.role === "assistant") metrics.finishedAt = Date.now();
 				} else if (event.type === "tool_execution_start") {
 					// pi's JSON protocol strips partial assistant snapshots (no
 					// per-token tool-call arg streaming at this layer), so Solar's UI
@@ -340,11 +424,12 @@ function generate(
 ): void {
 	void (async () => {
 		const session = await acquireForTurn(input, conversation, selection);
-		await pumpGeneration(generation, session.client, {
+		const result = await pumpGeneration(generation, session.client, {
 			conversationId: input.conversationId,
 			userText,
 		});
 		if (generation.status === "done") {
+			await recordTurnMetrics(input.conversationId, userText, result.metrics);
 			const userEntryId = await findLatestUserEntryId(
 				input.conversationId,
 				userText,
@@ -622,6 +707,42 @@ async function generatePiTitle(
 			.withError(error)
 			.withMetadata({ conversationId: input.conversationId })
 			.warn("pi title generation failed");
+	}
+}
+
+/**
+ * Persist the turn's streaming metrics as a pi custom entry. Custom entries
+ * are plain session data pi ignores when building context — they're how Solar
+ * attaches its own observability (TTFT/TPS/E2E + usage) without another
+ * table and without touching pi's message payloads.
+ */
+async function recordTurnMetrics(
+	conversationId: string,
+	_userText: string,
+	metrics: PiTurnMetrics | null,
+): Promise<void> {
+	if (!metrics) return;
+	const file = piSessionFile(conversationId);
+	if (!file) return;
+	try {
+		const manager = SessionManager.open(file, piSessionDir(conversationId));
+		const assistant = manager
+			.getBranch()
+			.filter(
+				(e): e is SessionMessageEntry =>
+					e.type === "message" &&
+					(e as SessionMessageEntry).message.role === "assistant",
+			)
+			.at(-1);
+		manager.appendCustomEntry(`solar-turn-metrics`, {
+			assistantEntryId: assistant?.id ?? null,
+			...metrics,
+		});
+	} catch (error) {
+		logger
+			.withError(error)
+			.withMetadata({ conversationId })
+			.warn("failed to persist pi turn metrics");
 	}
 }
 

@@ -101,8 +101,61 @@ export interface PiVisibleTurn {
 	entries: SessionMessageEntry[];
 }
 
+/** Attach Solar's stored solar-metrics payload to the assistant turn's parts JSON. */
+function withMetrics(
+	entry: SessionMessageEntry,
+	metrics: PiTurnMetricsRecord | undefined,
+): unknown {
+	const base = entry.message as unknown as Record<string, unknown>;
+	if (!metrics) return base;
+	return {
+		...base,
+		solarMetrics: {
+			ttftMs: metrics.ttftMs,
+			tps: metrics.tps,
+			e2e: metrics.e2e,
+		},
+	};
+}
+
 /** Entries on the current path, grouped into user/assistant visible turns. */
-export function piVisibleTurns(conversationId: string): PiVisibleTurn[] {
+export // ---------------------------------------------------------------------------
+// Turn metrics: read the custom entries the engine writes under
+// customType solar-turn-metrics (one per completed assistant turn).
+
+interface PiTurnMetricsRecord {
+	assistantEntryId: string | null;
+	ttftMs: number | null;
+	tps: number | null;
+	e2e: number | null;
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+}
+
+function piTurnMetricsByAssistant(
+	conversationId: string,
+): Map<string, PiTurnMetricsRecord> {
+	const manager = openManager(conversationId);
+	const byAssistant = new Map<string, PiTurnMetricsRecord>();
+	if (!manager) return byAssistant;
+	for (const entry of manager.getBranch()) {
+		if (
+			entry.type === "custom" &&
+			(entry as { customType?: string }).customType ===
+				"solar-turn-metrics"
+		) {
+			const data = (entry as { data?: PiTurnMetricsRecord }).data;
+			if (data?.assistantEntryId) {
+				byAssistant.set(data.assistantEntryId, data);
+			}
+		}
+	}
+	return byAssistant;
+}
+
+function piVisibleTurns(conversationId: string): PiVisibleTurn[] {
 	const manager = openManager(conversationId);
 	if (!manager) return [];
 	// Context entries (compaction-aware) hide summarized history; the visible
@@ -151,6 +204,7 @@ interface PiToolCall {
 export async function loadPiMessages(userId: string, conversationId: string) {
 	const turns = piVisibleTurns(conversationId);
 	const isLive = piGenerations.isConversationGenerating(conversationId);
+	const turnMetrics = piTurnMetricsByAssistant(conversationId);
 
 	const toolCallsByTurn = turns.map(extractPiToolCalls);
 	const toolNames = [...new Set(toolCallsByTurn.flat().map((call) => call.name))];
@@ -187,7 +241,9 @@ export async function loadPiMessages(userId: string, conversationId: string) {
 			id: turn.id,
 			role: turn.role,
 			text: entryTexts.join("\n"),
-			parts: JSON.stringify(last.message ?? null),
+			parts: JSON.stringify(
+				withMetrics(last, turnMetrics.get(last.id)),
+			),
 			status: "complete",
 			createdAt: turn.entries[0]!.timestamp,
 			reasoning: reasoning.join("\n"),
