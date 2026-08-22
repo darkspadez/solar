@@ -1,7 +1,6 @@
 /** Configuration for the pi-backed chat engine (docs/planning/pi-rpc-rewrite.md). */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { delimiter } from "node:path";
-import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { config } from "../config";
@@ -105,13 +104,32 @@ export function piBridgeExtensionPath(): string {
 
 /** Absolute path to pi-coding-agent's cli.js (RpcClient's cliPath). */
 export function piCliPath(): string {
-	// createRequire().resolve returns a plain filesystem path (unlike
-	// import.meta.resolveSync, which may hand back a non-file URL under bun
-	// --hot / bundled runtimes and breaks fileURLToPath).
-	const packageJsonPath = createRequire(import.meta.url).resolve(
-		"@earendil-works/pi-coding-agent/package.json",
+	// An explicit SOLAR_PI_CLI override wins (the packaged Docker image sets it
+	// directly — a resolved absolute path beats asking a bundled file to locate
+	// node_modules it may sit outside of).
+	const override = process.env.SOLAR_PI_CLI;
+	if (override) return override;
+
+	// Bun.resolveSync handles the actual resolution: createRequire().resolve is
+	// unreliable with packages whose `exports` map omits ./package.json, and
+	// import.meta.resolveSync can hand back non-file URLs under bun. Anchoring
+	// from this module is right in dev (src/ inside apps/server) and packaged
+	// (dist/ sits beside apps/server/node_modules in the image).
+	const here = fileURLToPath(import.meta.url);
+	try {
+		const mainPath = Bun.resolveSync("@earendil-works/pi-coding-agent", here);
+		return join(dirname(mainPath), "cli.js");
+	} catch {
+		// Fall through to the packaged-image-invariant path.
+	}
+	const packaged = join(
+		dirname(here),
+		"../apps/server/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
 	);
-	return join(dirname(packageJsonPath), "dist", "cli.js");
+	if (existsSync(packaged)) return packaged;
+	throw new Error(
+		`@earendil-works/pi-coding-agent is not resolvable from ${here}; set SOLAR_PI_CLI to the cli.js path.`,
+	);
 }
 
 let dirsEnsured = false;

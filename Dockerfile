@@ -20,6 +20,7 @@ ENV PORT=3000
 ENV DATABASE_PATH=/data/solar.db
 ENV SOLAR_ATTACHMENTS_DIR=/data/attachments
 ENV SOLAR_PI_AGENT_DIR=/data/pi-agent
+ENV SOLAR_PI_CLI=/app/apps/server/node_modules/@earendil-works/pi-coding-agent/dist/cli.js
 
 EXPOSE 3000
 
