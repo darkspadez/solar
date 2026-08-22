@@ -99,6 +99,83 @@ export interface PiVisibleTurn {
 	id: string;
 	role: "user" | "assistant";
 	entries: SessionMessageEntry[];
+	/** Compaction marker immediately preceding this turn, if any. */
+	summaryEvent?: {
+		tokensBefore: number;
+		tokensAfter: number | null;
+		revision: number;
+		createdAt: string;
+		position: "before";
+	};
+}
+
+function piVisibleTurns(conversationId: string): PiVisibleTurn[] {
+	const manager = openManager(conversationId);
+	if (!manager) return [];
+	// Walk the full current path (all entry types) so compaction markers keep
+	// their position; only message entries become turns.
+	const path = manager.getBranch();
+	const turns: PiVisibleTurn[] = [];
+
+	for (const entry of path) {
+		if (entry.type !== "message") continue;
+		const role: string = entry.message.role;
+		if (role === "user") {
+			turns.push({ id: entry.id, role: "user", entries: [entry] });
+		} else {
+			const current = turns.at(-1);
+			if (current && current.role === "assistant") {
+				current.entries.push(entry);
+				continue;
+			}
+			turns.push({ id: entry.id, role: "assistant", entries: [entry] });
+		}
+	}
+
+	// Compaction marker: the visible boundary is where the summarized region
+	// ends — i.e. the turn containing the latest compaction's firstKeptEntryId
+	// (pi's context starts there; everything before is hidden from the model,
+	// exactly what the badge communicates). Fallback: first turn after the
+	// compaction entry, in case firstKeptEntryId is a non-message entry.
+	const compactions = path.filter(
+		(entry) => entry.type === "compaction",
+	) as Array<{
+		id: string;
+		tokensBefore?: number;
+		timestamp: string;
+		firstKeptEntryId?: string;
+		usage?: { output?: number };
+	}>;
+	const latest = compactions.at(-1);
+	if (latest && turns.length > 0) {
+		const summaryEvent: PiVisibleTurn["summaryEvent"] = {
+			tokensBefore: latest.tokensBefore ?? 0,
+			tokensAfter: latest.usage?.output ?? null,
+			revision: compactions.length,
+			createdAt: latest.timestamp,
+			position: "before",
+		};
+		let target =
+			(latest.firstKeptEntryId
+				? turns.find((turn) =>
+						turn.entries.some(
+							(entry) => entry.id === latest.firstKeptEntryId,
+						),
+					)
+				: undefined) ?? null;
+		if (!target) {
+			const compactionIndex = path.findIndex(
+				(entry) => entry.id === latest.id,
+			);
+			const entryIndex = new Map(path.map((entry, i) => [entry.id, i]));
+			target =
+				turns.find(
+					(turn) => (entryIndex.get(turn.entries[0]!.id) ?? -1) > compactionIndex,
+				) ?? null;
+		}
+		(target ?? turns.at(-1)!).summaryEvent = summaryEvent;
+	}
+	return turns;
 }
 
 /** Attach Solar's stored solar-metrics payload to the assistant turn's parts JSON. */
@@ -155,36 +232,7 @@ function piTurnMetricsByAssistant(
 	return byAssistant;
 }
 
-function piVisibleTurns(conversationId: string): PiVisibleTurn[] {
-	const manager = openManager(conversationId);
-	if (!manager) return [];
-	// Context entries (compaction-aware) hide summarized history; the visible
-	// transcript is the full current path instead, so users keep seeing real
-	// messages even below a compaction boundary.
-	const path = manager
-		.getBranch()
-		.filter((entry): entry is SessionMessageEntry => entry.type === "message");
 
-	const turns: PiVisibleTurn[] = [];
-	for (const entry of path) {
-		// Compaction entries are filtered to messages upstream; the visible
-		// transcript keeps every real message on the current path (matches
-		// chat-v2's projection). Roles beyond user/assistant (toolResult,
-		// bashExecution, custom...) fold into the trailing assistant turn.
-		const role: string = entry.message.role;
-		if (role === "user") {
-			turns.push({ id: entry.id, role: "user", entries: [entry] });
-			continue;
-		}
-		const current = turns.at(-1);
-		if (current && current.role === "assistant") {
-			current.entries.push(entry);
-			continue;
-		}
-		turns.push({ id: entry.id, role: "assistant", entries: [entry] });
-	}
-	return turns;
-}
 
 interface PiToolCall {
 	id: string;
@@ -252,6 +300,7 @@ export async function loadPiMessages(userId: string, conversationId: string) {
 				...displayNames.get(call.name),
 			})),
 			skillInvocation: null,
+			summaryEvent: turn.summaryEvent ?? null,
 			attachments,
 			// Only a generation currently pumping into this conversation makes
 			// the trailing assistant turn live; the SSE id differs (see API).
@@ -437,11 +486,15 @@ export function piLatestCompaction(conversationId: string): {
 	tokensBefore: number;
 	createdAt: string;
 	usageOutput: number | null;
+	/** Number of compaction entries on the current branch — drives UI reloads. */
+	revision: number;
 } | null {
 	const manager = openManager(conversationId);
 	if (!manager) return null;
+	// Walk the current branch (not the whole tree) so abandoned-path
+	// compactions from edits/regenerations do not leak into the summary state.
 	const compactions = manager
-		.getEntries()
+		.getBranch()
 		.filter((entry) => entry.type === "compaction");
 	const latest = compactions.at(-1) as
 		| { tokensBefore?: number; timestamp: string; usage?: { output?: number } }
@@ -451,6 +504,7 @@ export function piLatestCompaction(conversationId: string): {
 		tokensBefore: latest.tokensBefore ?? 0,
 		createdAt: latest.timestamp,
 		usageOutput: latest.usage?.output ?? null,
+		revision: compactions.length,
 	};
 }
 

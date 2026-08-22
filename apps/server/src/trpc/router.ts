@@ -256,15 +256,15 @@ const conversationRouter = router({
 				estimatedTokens: latest?.tokensBefore ?? null,
 				summarized: latest !== null,
 				jobError: null,
-				summaryEvent: latest
-					? {
-							tokensBefore: latest.tokensBefore,
-							tokensAfter: latest.usageOutput ?? null,
-							revision: 1,
-							createdAt: latest.createdAt,
-							retainedMessageBoundaryId: null,
-						}
-					: null,
+			summaryEvent: latest
+				? {
+						tokensBefore: latest.tokensBefore,
+						tokensAfter: latest.usageOutput ?? null,
+						revision: latest.revision,
+						createdAt: latest.createdAt,
+						retainedMessageBoundaryId: null,
+					}
+				: null,
 			};
 		}),
 

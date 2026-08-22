@@ -59,6 +59,12 @@ interface FakeRow {
 	toolCalls: undefined;
 	attachments: never[];
 	isActive: boolean;
+	summaryEvent?: {
+		tokensBefore: number;
+		tokensAfter: number;
+		revision: number;
+		createdAt: string;
+	} | null;
 }
 
 const row = (
@@ -76,6 +82,7 @@ const row = (
 	toolCalls: undefined,
 	attachments: [],
 	isActive,
+	summaryEvent: null,
 });
 
 let historyRows: FakeRow[] = [];
@@ -202,7 +209,17 @@ describe("useSolarRuntime compaction", () => {
 		historyRows = [
 			row("u1", "user", "old question"),
 			row("a1", "assistant", "old answer"),
-			row("u2", "user", "new question"),
+			// The server's read path pins the badge to the turn right after the
+			// compaction — here that is u2 (the first kept turn).
+			{
+				...row("u2", "user", "new question"),
+				summaryEvent: {
+					tokensBefore: 272_000,
+					tokensAfter: 8_000,
+					revision: 2,
+					createdAt: "2026-07-19T20:14:47.000Z",
+				},
+			},
 			row("a2", "assistant", "new answer"),
 		];
 		const rendered = renderRuntime();
@@ -221,11 +238,9 @@ describe("useSolarRuntime compaction", () => {
 
 		await waitFor(() => {
 			expect(historyCalls).toBe(2);
-			// pi compacts in-process with no retained-message boundary; the badge
-			// pins to the final message of the current path instead.
 			const marker = rendered.result.current.thread
 				.getState()
-				.messages.find((message) => message.id === "a2")?.metadata?.custom as
+				.messages.find((message) => message.id === "u2")?.metadata?.custom as
 				| {
 						summaryEvent?: {
 							tokensBefore: number;
@@ -237,11 +252,22 @@ describe("useSolarRuntime compaction", () => {
 			expect(marker?.summaryEvent).toMatchObject({
 				tokensBefore: 272_000,
 				tokensAfter: 8_000,
-				position: "after",
 			});
+			// And the badge does NOT land on the conversation tail.
+			expect(
+				(
+					rendered.result.current.thread
+						.getState()
+						.messages.find((message) => message.id === "a2")?.metadata
+						?.custom as
+						| { summaryEvent?: { tokensBefore: number } }
+						| undefined
+				)?.summaryEvent,
+			).toBeUndefined();
 		});
 		rendered.unmount();
 	});
+
 });
 
 describe("useSolarRuntime cancel (Stop)", () => {

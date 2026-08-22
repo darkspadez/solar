@@ -194,15 +194,14 @@ export function useSolarRuntime(
 			trpcClient.conversation.messages.query({ conversationId }),
 			trpcClient.conversation.contextState.query({ conversationId }),
 		]);
-		// pi sessions hide summarized history server-side (the transcript we get
-		// back is already the current path), so there is no retained-message
-		// boundary marker to compute on the client.
-		const markerIndex = rows.length - 1;
+		// pi sessions hide summarized history server-side; the transcript we get
+		// back is already the current path. Row-level marker data (if any) pins
+		// the badge to the first kept turn rather than the tail.
 		loadedSummaryRevisionRef.current = contextState.summaryEvent
 			? contextState.summaryEvent.revision
 			: null;
 		setMessages(
-			rows.map((r, index) => ({
+			rows.map((r) => ({
 				id: r.id,
 				role: r.role,
 				content: r.text,
@@ -212,16 +211,10 @@ export function useSolarRuntime(
 					metricsByMessageRef.current.get(r.id) ?? parseMessageMetrics(r.parts),
 				toolCalls: toolCallsByMessageRef.current.get(r.id) ?? r.toolCalls,
 				parts: r.parts,
-				summaryEvent:
-					contextState.summaryEvent && index === markerIndex
-						? {
-								tokensBefore: contextState.summaryEvent.tokensBefore,
-								tokensAfter: contextState.summaryEvent.tokensAfter,
-								revision: contextState.summaryEvent.revision,
-								createdAt: contextState.summaryEvent.createdAt,
-								position: "after",
-							}
-						: undefined,
+				// The marker lives at the true boundary position: the server pins it
+				// to the first kept turn on the current path (pi semantics) instead
+				// of the transcript tail.
+				summaryEvent: r.summaryEvent ?? undefined,
 				attachments: r.attachments.length ? r.attachments : undefined,
 				skillInvocation: r.skillInvocation,
 			})),
