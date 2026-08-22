@@ -20,6 +20,7 @@ import {
 import {
 	CanonicalMessageValidationError,
 	parseCanonicalMessage,
+	repairDanglingToolCalls,
 	validateMessageSequence,
 	zeroUsage,
 } from "../validation";
@@ -2033,16 +2034,20 @@ export class ChatV2Repository {
 				createdAt: row.createdAt,
 			};
 		});
+		// Archive tolerance: frozen conversations can end in a dangling tool
+		// call (aborted/failed generation). Repair those in memory before the
+		// strict pairing validation runs so export/migration stay possible.
+		const repaired = repairDanglingToolCalls(records);
 		validateMessageSequence(
-			records.map((record) => record.message),
-			records.map((record) => ({
+			repaired.map((record) => record.message),
+			repaired.map((record) => ({
 				conversationId,
 				turnId: record.turnId ?? undefined,
 				messageId: record.id,
 				ordinal: record.ordinal,
 			})),
 		);
-		return records;
+		return repaired;
 	}
 
 	private async invalidateCompactionsIntersectingInTransaction(

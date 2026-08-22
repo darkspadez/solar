@@ -5,7 +5,7 @@ import type {
 	Usage,
 	UserMessage,
 } from "@earendil-works/pi-ai";
-import type { DiagnosticIds } from "./types";
+import type { CanonicalMessageRecord, DiagnosticIds } from "./types";
 
 export class CanonicalMessageValidationError extends Error {
 	readonly conversationId?: string;
@@ -206,4 +206,79 @@ export function validateMessageSequence(
 	for (const [index, message] of messages.entries())
 		parseCanonicalMessage(message, contexts[index] ?? { ordinal: index });
 	validateToolPairing(messages, contexts);
+}
+
+// ---------------------------------------------------------------------------
+// Archive tolerance
+
+const REPAIRED_TOOL_RESULT_TEXT =
+	"Tool call did not complete — the generation was aborted or failed before a result was recorded.";
+
+/**
+ * Repair dangling tool calls in a canonical message sequence, in memory.
+ *
+ * Some frozen (pre-pi engine) conversations end with an assistant message
+ * whose toolCall never got a result — aborted/failed generations persisted the
+ * call but not the outcome. Nothing can rewrite those archive rows, so reads
+ * that validate pairing (export, debug, migration) would hard-fail the entire
+ * conversation forever. Insert a synthetic error toolResult for every
+ * unresolved call, then let the strict validators below confirm the repaired
+ * sequence. The database is never mutated.
+ */
+export function repairDanglingToolCalls(
+	records: readonly CanonicalMessageRecord[],
+): CanonicalMessageRecord[] {
+	const repaired: CanonicalMessageRecord[] = [];
+	const pending = new Map<string, { name: string; anchor: CanonicalMessageRecord }>();
+
+	// Synthetics get fractional ordinals right after their anchor. Ordinals
+	// only order the in-memory sequence and describe validation failures;
+	// nothing persists them.
+	const flushPending = () => {
+		let index = 0;
+		for (const [toolCallId, { name, anchor }] of pending) {
+			index += 1;
+			const message: ToolResultMessage = {
+				role: "toolResult",
+				toolCallId,
+				toolName: name,
+				content: [{ type: "text", text: REPAIRED_TOOL_RESULT_TEXT }],
+				isError: true,
+				timestamp: Date.parse(anchor.createdAt),
+			};
+			repaired.push({
+				id: `${anchor.id}#repair-${index}`,
+				conversationId: anchor.conversationId,
+				turnId: anchor.turnId,
+				ordinal: anchor.ordinal + index * 0.001,
+				role: "toolResult",
+				message,
+				origin: "legacy",
+				status: "error",
+				createdAt: anchor.createdAt,
+			});
+		}
+		pending.clear();
+	};
+
+	for (const record of records) {
+		if (pending.size > 0) {
+			if (record.role === "toolResult") {
+				const result = record.message as ToolResultMessage;
+				if (pending.has(result.toolCallId)) pending.delete(result.toolCallId);
+				repaired.push(record);
+				continue;
+			}
+			// The unresolved calls never produced results; close them out before
+			// this next user/assistant message.
+			flushPending();
+		}
+		repaired.push(record);
+		if (record.role !== "assistant") continue;
+		for (const part of (record.message as AssistantMessage).content) {
+			if (part.type === "toolCall") pending.set(part.id, { name: part.name, anchor: record });
+		}
+	}
+	flushPending();
+	return repaired;
 }
