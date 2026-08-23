@@ -55,7 +55,14 @@ function seedSession(): { u2: string; u3: string } {
 	const u2 = manager.appendMessage(userMsg("new question"));
 	manager.appendMessage(assistantMsg("new answer"));
 	// u1/a1 summarized; the kept region starts at u2.
-	manager.appendCompaction("summary of the old exchange", u2, 272_000, undefined, false, usage(8_000));
+	manager.appendCompaction(
+		"summary of the old exchange",
+		u2,
+		272_000,
+		undefined,
+		false,
+		usage(8_000),
+	);
 	const u3 = manager.appendMessage(userMsg("follow-up question"));
 	manager.appendMessage(assistantMsg("follow-up answer"));
 	return { u2, u3 };

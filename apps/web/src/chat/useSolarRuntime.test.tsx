@@ -259,15 +259,12 @@ describe("useSolarRuntime compaction", () => {
 					rendered.result.current.thread
 						.getState()
 						.messages.find((message) => message.id === "a2")?.metadata
-						?.custom as
-						| { summaryEvent?: { tokensBefore: number } }
-						| undefined
+						?.custom as { summaryEvent?: { tokensBefore: number } } | undefined
 				)?.summaryEvent,
 			).toBeUndefined();
 		});
 		rendered.unmount();
 	});
-
 });
 
 describe("useSolarRuntime cancel (Stop)", () => {

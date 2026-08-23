@@ -7,7 +7,9 @@ import { mergeIntoLive } from "./merge-into-live";
 
 const paths: string[] = [];
 afterEach(async () => {
-	await Promise.all(paths.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+	await Promise.all(
+		paths.splice(0).map((path) => rm(path, { recursive: true, force: true })),
+	);
 });
 
 async function migratedDb(): Promise<string> {
@@ -20,12 +22,20 @@ async function migratedDb(): Promise<string> {
 	);
 	db.query(
 		"insert into v2_conversation values (?, ?, ?, null, null, null, null, null, null, '{}', ?, ?)",
-	).run("c1", "u1", "Chat", "2025-01-01T00:00:00.000Z", "2025-01-01T00:00:00.000Z");
+	).run(
+		"c1",
+		"u1",
+		"Chat",
+		"2025-01-01T00:00:00.000Z",
+		"2025-01-01T00:00:00.000Z",
+	);
 	db.close();
 	return path;
 }
 
-async function liveDb(options: { withV2Tables?: boolean; preSeeded?: boolean } = {}): Promise<string> {
+async function liveDb(
+	options: { withV2Tables?: boolean; preSeeded?: boolean } = {},
+): Promise<string> {
 	const root = await mkdtemp(join(tmpdir(), "solar-merge-live-"));
 	paths.push(root);
 	const path = join(root, "live.db");
@@ -57,7 +67,13 @@ async function liveDb(options: { withV2Tables?: boolean; preSeeded?: boolean } =
 		if (options.preSeeded)
 			db.query(
 				"insert into v2_conversation values (?, ?, ?, null, null, null, null, null, null, '{}', ?, ?)",
-			).run("existing", "u1", "Existing", "2025-01-01T00:00:00.000Z", "2025-01-01T00:00:00.000Z");
+			).run(
+				"existing",
+				"u1",
+				"Existing",
+				"2025-01-01T00:00:00.000Z",
+				"2025-01-01T00:00:00.000Z",
+			);
 	}
 	db.close();
 	return path;
@@ -72,30 +88,45 @@ describe("merge migrated v2 data into a live database", () => {
 		expect(report.integrityCheck).toBe("ok");
 		expect(report.foreignKeyCheck).toEqual([]);
 		const db = new Database(live, { readonly: true });
-		expect((db.query("select count(*) as count from v2_conversation").get() as any).count).toBe(1);
-		expect((db.query("select count(*) as count from user").get() as any).count).toBe(1);
-		expect((db.query("select count(*) as count from conversation").get() as any).count).toBe(1);
+		expect(
+			(db.query("select count(*) as count from v2_conversation").get() as any)
+				.count,
+		).toBe(1);
+		expect(
+			(db.query("select count(*) as count from user").get() as any).count,
+		).toBe(1);
+		expect(
+			(db.query("select count(*) as count from conversation").get() as any)
+				.count,
+		).toBe(1);
 		db.close();
 	});
 
 	test("refuses to merge into a live db missing the v2 schema", async () => {
 		const migrated = await migratedDb();
 		const live = await liveDb({ withV2Tables: false });
-		await expect(mergeIntoLive({ migratedDb: migrated, liveDb: live })).rejects.toThrow(
-			/missing table/,
-		);
+		await expect(
+			mergeIntoLive({ migratedDb: migrated, liveDb: live }),
+		).rejects.toThrow(/missing table/);
 	});
 
 	test("refuses to merge into a live db that already has v2 data unless forced", async () => {
 		const migrated = await migratedDb();
 		const live = await liveDb({ withV2Tables: true, preSeeded: true });
-		await expect(mergeIntoLive({ migratedDb: migrated, liveDb: live })).rejects.toThrow(
-			/already has rows/,
-		);
-		const report = await mergeIntoLive({ migratedDb: migrated, liveDb: live, force: true });
+		await expect(
+			mergeIntoLive({ migratedDb: migrated, liveDb: live }),
+		).rejects.toThrow(/already has rows/);
+		const report = await mergeIntoLive({
+			migratedDb: migrated,
+			liveDb: live,
+			force: true,
+		});
 		expect(report.integrityCheck).toBe("ok");
 		const db = new Database(live, { readonly: true });
-		expect((db.query("select count(*) as count from v2_conversation").get() as any).count).toBe(2);
+		expect(
+			(db.query("select count(*) as count from v2_conversation").get() as any)
+				.count,
+		).toBe(2);
 		db.close();
 	});
 });

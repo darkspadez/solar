@@ -108,7 +108,8 @@ chatRoutes.post("/", async (c) => {
 	} catch {
 		return c.json({ error: "invalid request body" }, 400);
 	}
-	const { conversationId, text, attachmentIds, userLocation, skillName } = input;
+	const { conversationId, text, attachmentIds, userLocation, skillName } =
+		input;
 	if (!text.trim() && !attachmentIds?.length && !skillName) {
 		return c.json(
 			{ error: "conversationId and text or an attachment are required" },
@@ -151,7 +152,8 @@ chatRoutes.post("/edit", async (c) => {
 		return c.json({ error: "messageId and text are required" }, 400);
 	}
 	const owner = await piFindEntryOwner(user.id, messageId);
-	if (owner?.role !== "user") return c.json({ error: "message not found" }, 404);
+	if (owner?.role !== "user")
+		return c.json({ error: "message not found" }, 404);
 	const assistantMessageId = await piEditUserMessage({
 		userId: user.id,
 		isAdmin: user.isAdmin,

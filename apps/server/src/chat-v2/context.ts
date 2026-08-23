@@ -6,7 +6,10 @@ import type {
 	ContextManifest,
 	AttachmentDecision,
 } from "./types";
-import { expandMessageAttachments, type AttachmentExpansionInput } from "./attachments";
+import {
+	expandMessageAttachments,
+	type AttachmentExpansionInput,
+} from "./attachments";
 import { validateMessageSequence } from "./validation";
 
 export class CompactionSelectionError extends Error {
@@ -227,11 +230,16 @@ export function materializeContext(
 	const attachmentDecisions: AttachmentDecision[] = [];
 	const expandedMessages = attachmentExpansion
 		? messages.map((message, index) => {
-			if (covered.has(index)) return message;
-			const expanded = expandMessageAttachments(message, attachmentExpansion.attachmentsByMessageId.get(message.id) ?? [], attachmentExpansion.capabilities, attachmentExpansion.resolve);
-			attachmentDecisions.push(...expanded.decisions);
-			return { ...message, message: expanded.message };
-		})
+				if (covered.has(index)) return message;
+				const expanded = expandMessageAttachments(
+					message,
+					attachmentExpansion.attachmentsByMessageId.get(message.id) ?? [],
+					attachmentExpansion.capabilities,
+					attachmentExpansion.resolve,
+				);
+				attachmentDecisions.push(...expanded.decisions);
+				return { ...message, message: expanded.message };
+			})
 		: messages;
 	return {
 		context: substituteCompactionRanges(expandedMessages, compactions),

@@ -141,10 +141,7 @@ export class PiSessionManager {
 	async acquire(options: AcquirePiSessionOptions): Promise<LivePiSession> {
 		const { conversationId } = options.identity;
 		const existing = this.sessions.get(conversationId);
-		if (
-			existing &&
-			existing.spawnSignature === spawnSignature(options)
-		) {
+		if (existing && existing.spawnSignature === spawnSignature(options)) {
 			existing.lastActivityAt = Date.now();
 			return existing;
 		}
@@ -160,7 +157,9 @@ export class PiSessionManager {
 		return spawn;
 	}
 
-	private async spawn(options: AcquirePiSessionOptions): Promise<LivePiSession> {
+	private async spawn(
+		options: AcquirePiSessionOptions,
+	): Promise<LivePiSession> {
 		const { conversationId } = options.identity;
 		this.enforcePoolLimit();
 		ensurePiDirs();
@@ -223,7 +222,9 @@ export class PiSessionManager {
 		// Wire crash recovery: an unexpected exit drops the handle; the next
 		// generation spawns fresh (plan: Crash recovery).
 		const childProcess = (
-			client as unknown as { process?: { once?: (ev: string, cb: () => void) => void } }
+			client as unknown as {
+				process?: { once?: (ev: string, cb: () => void) => void };
+			}
 		).process;
 		childProcess?.once?.("exit", () => {
 			logger
@@ -234,9 +235,7 @@ export class PiSessionManager {
 		});
 
 		this.sessions.set(conversationId, session);
-		logger
-			.withMetadata({ conversationId })
-			.info("pi session process spawned");
+		logger.withMetadata({ conversationId }).info("pi session process spawned");
 		return session;
 	}
 

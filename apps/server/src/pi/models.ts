@@ -63,7 +63,13 @@ interface PiModelEntry {
 	reasoning: boolean;
 	thinkingLevelMap?: Record<string, string | null>;
 	input: ("text" | "image")[];
-	cost: { input: number; output: number; cacheRead: number; cacheWrite: number; tiers?: unknown[] };
+	cost: {
+		input: number;
+		output: number;
+		cacheRead: number;
+		cacheWrite: number;
+		tiers?: unknown[];
+	};
 	contextWindow: number;
 	maxTokens: number;
 	[extra: string]: unknown;
@@ -115,14 +121,20 @@ function endpointModelEntry(
 		// The crucial one: without the level map pi can't translate our
 		// reasoningEffort choices into provider request parameters.
 		...(known?.thinkingLevelMap
-			? { thinkingLevelMap: { ...known.thinkingLevelMap } as Record<string, string | null> }
+			? {
+					thinkingLevelMap: { ...known.thinkingLevelMap } as Record<
+						string,
+						string | null
+					>,
+				}
 			: {}),
 		input: entry.vision
 			? ["text", "image"]
 			: (known?.input.filter((i) => i === "text" || i === "image") ?? ["text"]),
 		cost: known?.cost ? { ...known.cost } : { ...ZERO_COST },
 		contextWindow: windowTokens,
-		maxTokens: entry.maxTokens ?? known?.maxTokens ?? Math.min(windowTokens, 32_768),
+		maxTokens:
+			entry.maxTokens ?? known?.maxTokens ?? Math.min(windowTokens, 32_768),
 		...(known?.samplingParams
 			? { samplingParams: { ...known.samplingParams } }
 			: {}),
@@ -132,7 +144,9 @@ function endpointModelEntry(
 }
 
 /** Serialize the whole provider_config table as pi's models.json body. */
-export async function buildPiModelsJson(port: number): Promise<Record<string, PiProviderConfig>> {
+export async function buildPiModelsJson(
+	port: number,
+): Promise<Record<string, PiProviderConfig>> {
 	const configs = await loadProviderConfigs();
 	const builtins = await builtinPiModels();
 	const providers: Record<string, PiProviderConfig> = {};
@@ -142,7 +156,10 @@ export async function buildPiModelsJson(port: number): Promise<Record<string, Pi
 				.filter((entry) => entry.endpointId === endpoint.id)
 				.map((entry) => endpointModelEntry(config, entry, builtins));
 			if (models.length === 0) continue;
-			const providerId = piProviderId({ provider: config.provider, endpointId: endpoint.id });
+			const providerId = piProviderId({
+				provider: config.provider,
+				endpointId: endpoint.id,
+			});
 			providers[providerId] = {
 				name: endpoint.label,
 				baseUrl: normalizeBaseUrlForApi(endpoint.api, endpoint.baseUrl),
@@ -194,7 +211,9 @@ export async function buildPiAuthJson(): Promise<Record<string, unknown>> {
 	for (const config of configs) {
 		if (!config.apiKey) continue;
 		for (const endpoint of config.endpoints) {
-			auth[piProviderId({ provider: config.provider, endpointId: endpoint.id })] = {
+			auth[
+				piProviderId({ provider: config.provider, endpointId: endpoint.id })
+			] = {
 				type: "api_key",
 				key: config.apiKey,
 			};
@@ -217,9 +236,13 @@ export async function syncPiModelConfig(port: number): Promise<void> {
 		join(piConfig.agentDir, "models.json"),
 		JSON.stringify(models, null, 2),
 	);
-	writeFileSync(join(piConfig.agentDir, "auth.json"), JSON.stringify(auth, null, 2), {
-		mode: 0o600,
-	});
+	writeFileSync(
+		join(piConfig.agentDir, "auth.json"),
+		JSON.stringify(auth, null, 2),
+		{
+			mode: 0o600,
+		},
+	);
 	logger
 		.withMetadata({
 			providers: Object.keys(auth).length,
@@ -245,7 +268,13 @@ const AVAILABLE_CACHE_MS = 30_000;
  * no child process involved (plan: Model catalog integration — Read path).
  */
 export async function listPiAvailableModels(): Promise<
-	{ provider: string; id: string; name: string; reasoning: boolean; contextWindow: number }[]
+	{
+		provider: string;
+		id: string;
+		name: string;
+		reasoning: boolean;
+		contextWindow: number;
+	}[]
 > {
 	if (!existsSync(join(piConfig.agentDir, "models.json"))) return [];
 	if (availableCache && Date.now() - availableCache.at < AVAILABLE_CACHE_MS) {
@@ -302,13 +331,12 @@ function readPiModelEntry(selection: {
 	if (!existsSync(path)) return null;
 	try {
 		const parsed = JSON.parse(readFileSync(path, "utf-8")) as {
-			providers?: Record<
-				string,
-				{ models?: PiModelJsonEntry[] }
-			>;
+			providers?: Record<string, { models?: PiModelJsonEntry[] }>;
 		};
 		const provider = parsed.providers?.[piProviderId(selection)];
-		return provider?.models?.find((entry) => entry.id === selection.modelId) ?? null;
+		return (
+			provider?.models?.find((entry) => entry.id === selection.modelId) ?? null
+		);
 	} catch {
 		return null;
 	}
@@ -333,8 +361,7 @@ export function piModelCapabilities(selection: {
 		? THINKING_LEVELS.filter(
 				(level) =>
 					map[level] !== null &&
-					((level !== "xhigh" && level !== "max") ||
-						map[level] !== undefined),
+					((level !== "xhigh" && level !== "max") || map[level] !== undefined),
 			)
 		: [];
 	return {

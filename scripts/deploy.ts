@@ -13,8 +13,7 @@ import { spawnSync } from "node:child_process";
 
 type Target = "production" | "staging";
 
-const TARGET: | Target
-	| undefined = Bun.argv[2] as Target | undefined;
+const TARGET: Target | undefined = Bun.argv[2] as Target | undefined;
 if (TARGET !== "production" && TARGET !== "staging") {
 	console.error("usage: bun run scripts/deploy.ts <staging|production>");
 	process.exit(1);
@@ -25,10 +24,7 @@ function env(name: string, fallback?: string): string | undefined {
 	return process.env[`SOLAR_${PREFIX}_${name}`] ?? fallback;
 }
 
-const defaults: Record<
-	Target,
-	{ imageName: string; tagPrefix: string }
-> = {
+const defaults: Record<Target, { imageName: string; tagPrefix: string }> = {
 	// Staging hosts the pi-engine build; production carries the current build.
 	staging: { imageName: "solar-pi", tagPrefix: "staging" },
 	production: { imageName: "solar", tagPrefix: "production" },
@@ -38,7 +34,10 @@ const { imageName: defaultImageName, tagPrefix } = defaults[TARGET];
 
 const context = env("DOCKER_CONTEXT") ?? "dolphin";
 const sshHost = env("SSH_HOST") ?? context;
-const deployUrl = (env("URL") ?? "https://solar.home.cowger.us").replace(/\/$/, "");
+const deployUrl = (env("URL") ?? "https://solar.home.cowger.us").replace(
+	/\/$/,
+	"",
+);
 const containerName = env("CONTAINER_NAME") ?? "Solar";
 const imageName = env("IMAGE_NAME") ?? defaultImageName;
 const imageRetention = Number.parseInt(env("IMAGE_RETAIN") ?? "3", 10);
@@ -169,7 +168,11 @@ docker(
 	{ stream: true },
 );
 console.log(`\nRecreating ${containerName} through Compose...`);
-compose(previous.composeWorkingDir, previous.composeProject, previous.composeService);
+compose(
+	previous.composeWorkingDir,
+	previous.composeProject,
+	previous.composeService,
+);
 
 const updated = docker(["inspect", "--format", "{{.Image}}", containerName], {
 	fatal: false,
@@ -243,7 +246,9 @@ const images = docker(["images", imageName, "--format", "{{.Tag}}"], {
 if (images.success) {
 	const staleTags = images.stdout
 		.split("\n")
-		.filter((tag) => tag.startsWith(`${tagPrefix}-`) && tag !== `${tagPrefix}-latest`)
+		.filter(
+			(tag) => tag.startsWith(`${tagPrefix}-`) && tag !== `${tagPrefix}-latest`,
+		)
 		.slice(imageRetention);
 	for (const tag of staleTags)
 		docker(["rmi", `${imageName}:${tag}`], { fatal: false });

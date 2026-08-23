@@ -2,7 +2,10 @@ import { afterEach, describe, expect, mock, test } from "bun:test";
 import { writeXlsx } from "openjsxl";
 
 const files = new Map<string, Uint8Array>();
-const v2AttachmentRows = new Map<string, { storageKey: string; userId: string }>();
+const v2AttachmentRows = new Map<
+	string,
+	{ storageKey: string; userId: string }
+>();
 
 function selectQuery(table: string) {
 	const where: [string, unknown][] = [];
@@ -28,7 +31,9 @@ function selectQuery(table: string) {
 mock.module("../config", () => ({
 	config: { attachmentsDataDir: "/test/attachments" },
 }));
-mock.module("../db", () => ({ db: { selectFrom: (table: string) => selectQuery(table) } }));
+mock.module("../db", () => ({
+	db: { selectFrom: (table: string) => selectQuery(table) },
+}));
 mock.module("@struktoai/mirage-node", () => ({
 	DiskResource: class {
 		open = async () => {};
@@ -182,8 +187,20 @@ describe("attachments", () => {
 
 		await expect(
 			attachments.expandAttachmentRows([
-				{ id: "image", storageKey: "user-1/image", kind: "image", mimeType: "image/png", filename: "photo.png" },
-				{ id: "text", storageKey: "user-1/text", kind: "text", mimeType: "text/plain", filename: "note.txt" },
+				{
+					id: "image",
+					storageKey: "user-1/image",
+					kind: "image",
+					mimeType: "image/png",
+					filename: "photo.png",
+				},
+				{
+					id: "text",
+					storageKey: "user-1/text",
+					kind: "text",
+					mimeType: "text/plain",
+					filename: "note.txt",
+				},
 			]),
 		).resolves.toEqual({
 			parts: [
@@ -206,7 +223,13 @@ describe("attachments", () => {
 
 	test("loads documents as opaque native inputs only when enabled", async () => {
 		files.set("/user-1/document", new Uint8Array([0, 1, 2]));
-		const row = { id: "document", storageKey: "user-1/document", kind: "document" as const, mimeType: "application/pdf", filename: "report.pdf" };
+		const row = {
+			id: "document",
+			storageKey: "user-1/document",
+			kind: "document" as const,
+			mimeType: "application/pdf",
+			filename: "report.pdf",
+		};
 
 		await expect(attachments.expandAttachmentRows([row])).resolves.toEqual({
 			parts: [],
@@ -232,7 +255,13 @@ describe("attachments", () => {
 
 	test("empty documents degrade to a placeholder instead of sinking the batch", async () => {
 		files.set("/user-1/document", new Uint8Array());
-		const row = { id: "document", storageKey: "user-1/document", kind: "document" as const, mimeType: "application/pdf", filename: "empty.pdf" };
+		const row = {
+			id: "document",
+			storageKey: "user-1/document",
+			kind: "document" as const,
+			mimeType: "application/pdf",
+			filename: "empty.pdf",
+		};
 
 		const { parts } = await attachments.expandAttachmentRows([row], {
 			nativeMimeTypes: ["application/pdf"],
@@ -254,7 +283,8 @@ describe("attachments", () => {
 			id: "spreadsheet",
 			storageKey: "user-1/spreadsheet",
 			kind: "document" as const,
-			mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+			mimeType:
+				"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 			filename: "inventory.xlsx",
 		};
 

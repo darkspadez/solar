@@ -19,11 +19,26 @@ mock.module("../chat/attachments", () => ({
 }));
 mock.module("../logger", () => ({
 	logger: {
-		withMetadata: () => ({ trace: () => {}, debug: () => {}, info: () => {}, warn: () => {}, error: () => {} }),
-		withError: () => ({ withMetadata: () => ({ warn: () => {}, error: () => {} }) }),
+		withMetadata: () => ({
+			trace: () => {},
+			debug: () => {},
+			info: () => {},
+			warn: () => {},
+			error: () => {},
+		}),
+		withError: () => ({
+			withMetadata: () => ({ warn: () => {}, error: () => {} }),
+		}),
 	},
 	getLogLevel: () => "info",
 	setLogLevel: () => {},
+}));
+mock.module("../pi/migration", () => ({
+	attachmentMarker: (ids: string[]) =>
+		`<solar-attachments ids="${ids.join(",")}"/>`,
+	isPiSessionReady: (conversationId: string) => conversationId === "pi-backed",
+	importConversation: async () => null,
+	piSessionFile: () => null,
 }));
 mock.module("../chat/catalog", () => ({
 	MOCK: true,
@@ -36,6 +51,7 @@ mock.module("../chat/catalog", () => ({
 		modelId: "mock",
 		api: "mock",
 	}),
+	mockForcedSelection: (selection: unknown) => selection,
 	resolveModel: async () => {
 		throw new Error("resolveModel should not be called in this test");
 	},
@@ -50,7 +66,10 @@ mock.module("../chat/catalog", () => ({
 		defaultVerbosity: null,
 	}),
 	documentInputMimeTypes: async () => [],
-	documentInputCapabilities: async () => ({ nativeMimeTypes: [], extractedTextMimeTypes: [] }),
+	documentInputCapabilities: async () => ({
+		nativeMimeTypes: [],
+		extractedTextMimeTypes: [],
+	}),
 	getUserDefault: async () => null,
 	setUserDefault: async () => {},
 	getUserDefaultPreset: async () => null,
@@ -114,8 +133,31 @@ describe("context management metadata", () => {
 		);
 	});
 
+	test("keeps pi-backed conversations when creating a new chat", async () => {
+		await chatV2Repository.createConversation(USER_ID, {
+			id: "pi-backed",
+			title: "Persisted chat",
+		});
+		await chatV2Repository.createConversation(USER_ID, {
+			id: "empty-draft",
+			title: "Empty draft",
+		});
+		const caller = appRouter.createCaller({ user: { id: USER_ID } } as never);
+
+		await caller.conversation.create({});
+
+		expect((await caller.conversation.list()).map((row) => row.id)).toContain(
+			"pi-backed",
+		);
+		await expect(
+			chatV2Repository.getConversation(USER_ID, "empty-draft"),
+		).rejects.toThrow();
+	});
+
 	test("returns idle context status for a conversation with no pi session", async () => {
-		const conversation = await chatV2Repository.createConversation(USER_ID, { title: "Chat" });
+		const conversation = await chatV2Repository.createConversation(USER_ID, {
+			title: "Chat",
+		});
 		const caller = appRouter.createCaller({ user: { id: USER_ID } } as never);
 
 		await expect(
@@ -130,8 +172,12 @@ describe("context management metadata", () => {
 	});
 
 	test("rejects context status for a conversation the user does not own", async () => {
-		const conversation = await chatV2Repository.createConversation(USER_ID, { title: "Chat" });
-		const caller = appRouter.createCaller({ user: { id: "someone-else" } } as never);
+		const conversation = await chatV2Repository.createConversation(USER_ID, {
+			title: "Chat",
+		});
+		const caller = appRouter.createCaller({
+			user: { id: "someone-else" },
+		} as never);
 
 		await expect(
 			caller.conversation.contextState({ conversationId: conversation.id }),
@@ -139,8 +185,12 @@ describe("context management metadata", () => {
 	});
 
 	test("rejects compact for a conversation the user does not own", async () => {
-		const conversation = await chatV2Repository.createConversation(USER_ID, { title: "Chat" });
-		const caller = appRouter.createCaller({ user: { id: "someone-else" } } as never);
+		const conversation = await chatV2Repository.createConversation(USER_ID, {
+			title: "Chat",
+		});
+		const caller = appRouter.createCaller({
+			user: { id: "someone-else" },
+		} as never);
 
 		await expect(
 			caller.conversation.compact({ conversationId: conversation.id }),

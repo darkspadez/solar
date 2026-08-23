@@ -1,5 +1,13 @@
-import { convertToLlm, createCompactionSummaryMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, Message, ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
+import {
+	convertToLlm,
+	createCompactionSummaryMessage,
+} from "@earendil-works/pi-agent-core";
+import type {
+	AssistantMessage,
+	Message,
+	ToolResultMessage,
+	UserMessage,
+} from "@earendil-works/pi-ai";
 import { zeroUsage } from "./validation";
 
 const TIMESTAMP = 1_700_000_000_000;
@@ -30,7 +38,10 @@ function assistant(
 }
 
 export function plainTextExchange(): Message[] {
-	return [user("Hello", TIMESTAMP), assistant([{ type: "text", text: "Hi." }], TIMESTAMP + 1)];
+	return [
+		user("Hello", TIMESTAMP),
+		assistant([{ type: "text", text: "Hi." }], TIMESTAMP + 1),
+	];
 }
 
 export function reasoningAssistantMessage(): AssistantMessage {
@@ -57,12 +68,22 @@ export function toolCallResultContinuation(): Message[] {
 	return [
 		user("What is the weather?", TIMESTAMP),
 		assistant(
-			[{ type: "toolCall", id: toolCallId, name: toolName, arguments: { city: "Austin" } }],
+			[
+				{
+					type: "toolCall",
+					id: toolCallId,
+					name: toolName,
+					arguments: { city: "Austin" },
+				},
+			],
 			TIMESTAMP + 1,
 			{ stopReason: "toolUse" },
 		),
 		result,
-		assistant([{ type: "text", text: "It is 20 C and clear in Austin." }], TIMESTAMP + 3),
+		assistant(
+			[{ type: "text", text: "It is 20 C and clear in Austin." }],
+			TIMESTAMP + 3,
+		),
 	];
 }
 
@@ -80,7 +101,10 @@ export function imageAndTextAttachmentMessage(): UserMessage {
 export function voiceTranscriptPair(): Message[] {
 	return [
 		user("Please summarize the meeting.", TIMESTAMP),
-		assistant([{ type: "text", text: "The meeting covered launch timing." }], TIMESTAMP + 1),
+		assistant(
+			[{ type: "text", text: "The meeting covered launch timing." }],
+			TIMESTAMP + 1,
+		),
 	];
 }
 
@@ -99,6 +123,10 @@ export function failedGeneration(): AssistantMessage {
 
 export function compactionReplacementRange(): Message[] {
 	return convertToLlm([
-		createCompactionSummaryMessage("The user asked about launch timing.", 120, new Date(TIMESTAMP).toISOString()),
+		createCompactionSummaryMessage(
+			"The user asked about launch timing.",
+			120,
+			new Date(TIMESTAMP).toISOString(),
+		),
 	]);
 }

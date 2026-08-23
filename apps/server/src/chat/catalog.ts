@@ -33,6 +33,25 @@ export {
 
 export const MOCK = Boolean(process.env.SOLAR_MOCK_LLM);
 
+const MOCK_DEFAULT_SELECTION: ModelSelection = {
+	provider: "mock",
+	endpointId: "mock",
+	modelId: "mock-reasoning",
+	api: "mock",
+};
+
+/**
+ * Mock-mode guard: dev/test traffic must never reach live (paid) providers —
+ * SOLAR_MOCK_LLM historically only *added* mock models to the catalog, so a
+ * conversation snapshot pinned to a real provider still made paid calls.
+ * Redirect any non-mock selection to the default mock model. Every LLM call
+ * site (engine turns, titles, compaction) must pass through this first.
+ */
+export function mockForcedSelection(selection: ModelSelection): ModelSelection {
+	if (!MOCK || selection.provider === "mock") return selection;
+	return MOCK_DEFAULT_SELECTION;
+}
+
 const API_STREAMS = {
 	"openai-responses": openAIResponsesApi(),
 	"openai-completions": openAICompletionsApi(),

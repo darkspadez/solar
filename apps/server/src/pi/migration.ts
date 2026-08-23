@@ -12,7 +12,13 @@
  * the check, via isPiSessionReady().
  */
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	renameSync,
+	rmSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { Message } from "@earendil-works/pi-ai";
@@ -111,7 +117,9 @@ export async function importConversation(
 
 		const canonical = (
 			await chatV2Repository.listCanonicalMessages(userId, conversationId)
-		).filter((record) => record.status !== "pending" && record.status !== "streaming");
+		).filter(
+			(record) => record.status !== "pending" && record.status !== "streaming",
+		);
 		const compactions = await chatV2Repository.listCompactions(
 			userId,
 			conversationId,
@@ -227,9 +235,9 @@ export async function importConversation(
 		}
 		for (const ids of attachmentIdsByMessageId.values()) {
 			for (const id of ids) {
-				const exists = await chatV2Repository.getAttachment(userId, id).catch(
-					() => null,
-				);
+				const exists = await chatV2Repository
+					.getAttachment(userId, id)
+					.catch(() => null);
 				if (!exists)
 					throw new Error(
 						`verification failed: attachment ${id} no longer exists`,

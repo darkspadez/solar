@@ -22,6 +22,7 @@ import {
 } from "../chat/builtins";
 import {
 	getTitlePrompt,
+	mockForcedSelection,
 	resolveSelection,
 	resolveTaskModelOrFallback,
 	type ModelSelection,
@@ -76,15 +77,19 @@ async function resolveTurn(input: PiTurnInput) {
 		input.userId,
 		input.conversationId,
 	);
-	const selection = await resolveSelection(
-		{
-			provider: conversation.provider ?? undefined,
-			endpointId: conversation.endpointId ?? undefined,
-			modelId: conversation.modelId ?? undefined,
-			api: conversation.modelApi ?? undefined,
-		},
-		input.userId,
-		input.isAdmin,
+	// Mock mode redirects every stored selection to the mock model — a
+	// conversation pinned to a real provider must never make paid calls in dev.
+	const selection = mockForcedSelection(
+		await resolveSelection(
+			{
+				provider: conversation.provider ?? undefined,
+				endpointId: conversation.endpointId ?? undefined,
+				modelId: conversation.modelId ?? undefined,
+				api: conversation.modelApi ?? undefined,
+			},
+			input.userId,
+			input.isAdmin,
+		),
 	);
 	if (piGenerations.isConversationGenerating(input.conversationId)) {
 		throw new Error("conversation is already generating");
@@ -251,7 +256,9 @@ function pumpGeneration(
 			if (!ok || m.startedAt === null) return null;
 			const finished = m.finishedAt ?? Date.now();
 			const ttftMs =
-				m.firstTokenAt === null ? null : m.firstTokenAt - (m.startedAt as number);
+				m.firstTokenAt === null
+					? null
+					: m.firstTokenAt - (m.startedAt as number);
 			const output = m.usage.output;
 			const tps =
 				ttftMs !== null && output > 0 && finished > (m.firstTokenAt as number)
@@ -279,27 +286,30 @@ function pumpGeneration(
 
 		// Stall watchdog (plan: Watchdog): reset on every inbound event; lapse →
 		// abort, grace for agent_settled, then kill.
-		stallTimer = setInterval(() => {
-			if (Date.now() - lastActivity < piConfig.stallTimeoutMs) return;
-			lastActivity = Date.now();
-			logger
-				.withMetadata({
-					conversationId: generation.conversationId,
-					generationId: generation.id,
-				})
-				.warn("pi generation stalled; aborting");
-			void client
-				.abort()
-				.catch(() => {})
-				.finally(() => {
-					abortGrace = setTimeout(() => {
-						void piSessionManager
-							.drop(generation.conversationId)
-							.catch(() => {});
-						finish(false, "generation stalled and was aborted");
-					}, piConfig.abortGraceMs);
-				});
-		}, Math.min(piConfig.stallTimeoutMs, 5_000));
+		stallTimer = setInterval(
+			() => {
+				if (Date.now() - lastActivity < piConfig.stallTimeoutMs) return;
+				lastActivity = Date.now();
+				logger
+					.withMetadata({
+						conversationId: generation.conversationId,
+						generationId: generation.id,
+					})
+					.warn("pi generation stalled; aborting");
+				void client
+					.abort()
+					.catch(() => {})
+					.finally(() => {
+						abortGrace = setTimeout(() => {
+							void piSessionManager
+								.drop(generation.conversationId)
+								.catch(() => {});
+							finish(false, "generation stalled and was aborted");
+						}, piConfig.abortGraceMs);
+					});
+			},
+			Math.min(piConfig.stallTimeoutMs, 5_000),
+		);
 		stallTimer.unref?.();
 
 		client.onEvent((event) => {
@@ -407,9 +417,7 @@ export async function piSendMessage(
 	}
 	const isFirstMessage = conversationIsEmpty(input.conversationId);
 
-	const skills = input.skillName
-		? await listExposedSkills(input.userId)
-		: null;
+	const skills = input.skillName ? await listExposedSkills(input.userId) : null;
 	const skill = skills?.find((candidate) => candidate.name === input.skillName);
 	if (input.skillName && !skill) throw new Error("skill not found");
 
@@ -424,7 +432,15 @@ export async function piSendMessage(
 		conversationId: input.conversationId,
 		userId: input.userId,
 	});
-	generate(generation, input, conversation, selection, userText, [], isFirstMessage);
+	generate(
+		generation,
+		input,
+		conversation,
+		selection,
+		userText,
+		[],
+		isFirstMessage,
+	);
 	return generation.id;
 }
 
@@ -529,7 +545,8 @@ export async function piEditUserMessage(input: PiEditInput): Promise<string> {
 	const { conversation, selection } = await resolveTurn(input);
 	const manager = openSession(input.conversationId);
 	const target = manager.getEntry(input.targetTurnId);
-	if (!target || target.type !== "message") throw new Error("message not found");
+	if (!target || target.type !== "message")
+		throw new Error("message not found");
 	// Root-of-tree edits (first message, no parent) restart the conversation:
 	// navigateTree has no "reset to null" target, and chat-v2 discarded
 	// everything after the edited message anyway. skipImport: the conversation
@@ -557,7 +574,9 @@ export async function piRegenerateAssistantTurn(
 	const { conversation, selection } = await resolveTurn(input);
 	const manager = openSession(input.conversationId);
 	const path = manager.getBranch();
-	const targetIndex = path.findIndex((entry) => entry.id === input.targetTurnId);
+	const targetIndex = path.findIndex(
+		(entry) => entry.id === input.targetTurnId,
+	);
 	if (targetIndex < 0) throw new Error("message not found");
 	// assistant-ui's onReload may pass the assistant entry or its parent user
 	// entry; both resolve to "the user prompt to re-answer".
@@ -638,7 +657,9 @@ export async function piCompact(input: PiTurnInput): Promise<void> {
 }
 
 /** conversation.remove for pi conversations: kill the child + drop the files. */
-export async function piDeleteConversation(conversationId: string): Promise<void> {
+export async function piDeleteConversation(
+	conversationId: string,
+): Promise<void> {
 	await piSessionManager.drop(conversationId);
 	const dir = piSessionDir(conversationId);
 	try {
@@ -703,7 +724,11 @@ async function generatePiTitle(
 	userText: string,
 ): Promise<void> {
 	try {
-		const taskSelection = await resolveTaskModelOrFallback(selection);
+		// The admin task-model default may point at a live provider; mock mode
+		// must rewrite it just like the turn selection above.
+		const taskSelection = mockForcedSelection(
+			await resolveTaskModelOrFallback(selection),
+		);
 		const title = await generatePiTitleText(
 			userText,
 			await getTitlePrompt(),

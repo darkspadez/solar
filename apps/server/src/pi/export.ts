@@ -9,7 +9,10 @@ import {
 	type SessionMessageEntry,
 } from "@earendil-works/pi-coding-agent";
 import type { Message } from "@earendil-works/pi-ai";
-import { CHAT_V2_EXPORT_VERSION, type ChatV2ExportBundle } from "../chat-v2/export";
+import {
+	CHAT_V2_EXPORT_VERSION,
+	type ChatV2ExportBundle,
+} from "../chat-v2/export";
 import { chatV2Repository } from "../chat-v2/db/repository";
 import type {
 	AttachmentRecord,
@@ -49,9 +52,7 @@ export async function buildPiExportBundle(
 	if (!conversation) throw new Error("conversation not found");
 	const messageEntries = manager
 		.getEntries()
-		.filter(
-			(entry): entry is SessionMessageEntry => entry.type === "message",
-		);
+		.filter((entry): entry is SessionMessageEntry => entry.type === "message");
 
 	const markers: MarkerEntry[] = [];
 	const messages: CanonicalMessageRecord[] = [];
@@ -124,7 +125,9 @@ export async function buildPiExportBundle(
 			id: conversation.id,
 			userId: conversation.userId,
 			title:
-				manager.getSessionName() ?? conversation.title ?? `Imported ${conversationId}`,
+				manager.getSessionName() ??
+				conversation.title ??
+				`Imported ${conversationId}`,
 			folderId: conversation.folderId,
 			provider: conversation.provider,
 			endpointId: conversation.endpointId,

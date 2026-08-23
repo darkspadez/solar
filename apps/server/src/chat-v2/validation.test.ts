@@ -66,7 +66,12 @@ const user = () =>
 describe("repairDanglingToolCalls", () => {
 	test("leaves healthy sequences untouched", () => {
 		ordinal = 0;
-		const records = [user(), assistantWithCall("call_A"), toolResult("call_A"), user()];
+		const records = [
+			user(),
+			assistantWithCall("call_A"),
+			toolResult("call_A"),
+			user(),
+		];
 		const repaired = repairDanglingToolCalls(records);
 		expect(repaired).toEqual(records);
 		expect(() =>
@@ -83,9 +88,7 @@ describe("repairDanglingToolCalls", () => {
 		expect(synthetic.role).toBe("toolResult");
 		expect(synthetic.status).toBe("error");
 		expect(synthetic.origin).toBe("legacy");
-		expect(
-			(synthetic.message as { isError: boolean }).isError,
-		).toBe(true);
+		expect((synthetic.message as { isError: boolean }).isError).toBe(true);
 		expect(() =>
 			validateMessageSequence(repaired.map((r) => r.message)),
 		).not.toThrow();

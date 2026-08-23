@@ -29,18 +29,29 @@ export const piConfig = {
 	},
 
 	/** Root of pi's agent state (auth.json, models.json, sessions/). */
-	agentDir: resolve(process.env.SOLAR_PI_AGENT_DIR ?? join(dataRoot(), "pi-agent")),
+	agentDir: resolve(
+		process.env.SOLAR_PI_AGENT_DIR ?? join(dataRoot(), "pi-agent"),
+	),
 	/** Scratch directories handed to pi as cwd (never meaningfully written). */
 	cwdRoot: resolve(process.env.SOLAR_PI_CWD_ROOT ?? join(dataRoot(), "pi-cwd")),
 
 	maxProcesses: positiveIntEnv("SOLAR_PI_MAX_PROCESSES", DEFAULT_MAX_PROCESSES),
-	idleTimeoutMs: positiveIntEnv("SOLAR_PI_IDLE_TIMEOUT_MS", DEFAULT_IDLE_TIMEOUT_MS),
+	idleTimeoutMs: positiveIntEnv(
+		"SOLAR_PI_IDLE_TIMEOUT_MS",
+		DEFAULT_IDLE_TIMEOUT_MS,
+	),
 	startupTimeoutMs: positiveIntEnv(
 		"SOLAR_PI_STARTUP_TIMEOUT_MS",
 		DEFAULT_STARTUP_TIMEOUT_MS,
 	),
-	stallTimeoutMs: positiveIntEnv("SOLAR_PI_STALL_TIMEOUT_MS", DEFAULT_STALL_TIMEOUT_MS),
-	abortGraceMs: positiveIntEnv("SOLAR_PI_ABORT_GRACE_MS", DEFAULT_ABORT_GRACE_MS),
+	stallTimeoutMs: positiveIntEnv(
+		"SOLAR_PI_STALL_TIMEOUT_MS",
+		DEFAULT_STALL_TIMEOUT_MS,
+	),
+	abortGraceMs: positiveIntEnv(
+		"SOLAR_PI_ABORT_GRACE_MS",
+		DEFAULT_ABORT_GRACE_MS,
+	),
 } as const;
 
 // NOTE: pi's own RpcClient hardcodes `spawn("node", cliPath)`. Solar does not
@@ -63,7 +74,9 @@ export function ensurePiNodeShim(): void {
 	mkdirSync(piNodeShimDir(), { recursive: true });
 	const shimPath = join(piNodeShimDir(), "node");
 	const want = `#!/bin/sh\nexec "${bunExecutable()}" "$@"\n`;
-	const existing = existsSync(shimPath) ? readFileSync(shimPath, "utf-8") : null;
+	const existing = existsSync(shimPath)
+		? readFileSync(shimPath, "utf-8")
+		: null;
 	if (existing !== want) {
 		writeFileSync(shimPath, want, { mode: 0o755 });
 	}
@@ -96,7 +109,8 @@ export function piBridgeExtensionPath(): string {
 		join(here, "bridge", "extension.ts"),
 		join(here, "pi-extension.ts"),
 	];
-	for (const candidate of candidates) if (existsSync(candidate)) return candidate;
+	for (const candidate of candidates)
+		if (existsSync(candidate)) return candidate;
 	throw new Error(
 		`pi bridge extension not found next to ${here}; copy it beside the bundle (pi-extension.ts) or set SOLAR_PI_EXTENSION.`,
 	);

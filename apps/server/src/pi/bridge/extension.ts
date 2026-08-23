@@ -126,10 +126,13 @@ export default async function solarBridgeExtension(pi: ExtensionAPI) {
 					parameters: Type.Unsafe(tool.parameters as never),
 					execute: async (_toolCallId, params) => {
 						try {
-							const result = (await bridge("/internal/pi-bridge/tools/execute", {
-								method: "POST",
-								body: JSON.stringify({ toolName: tool.name, args: params }),
-							})) as { content: string; isError: boolean };
+							const result = (await bridge(
+								"/internal/pi-bridge/tools/execute",
+								{
+									method: "POST",
+									body: JSON.stringify({ toolName: tool.name, args: params }),
+								},
+							)) as { content: string; isError: boolean };
 							return {
 								content: [{ type: "text", text: result.content }],
 								isError: result.isError,
@@ -201,7 +204,9 @@ export default async function solarBridgeExtension(pi: ExtensionAPI) {
 						: undefined;
 				})
 				.filter((part): part is unknown => part !== undefined);
-			return touched ? { ...message, content: [...rewritten, ...extra] } : message;
+			return touched
+				? { ...message, content: [...rewritten, ...extra] }
+				: message;
 		});
 		return { messages };
 	});

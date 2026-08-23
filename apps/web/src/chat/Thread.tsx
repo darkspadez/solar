@@ -982,7 +982,10 @@ function AssistantMetrics({ metrics }: { metrics?: SolarMetrics }) {
 		cacheWriteTokens: null,
 	};
 	return (
-		<span className="solar-metrics" title="Response performance and token usage">
+		<span
+			className="solar-metrics"
+			title="Response performance and token usage"
+		>
 			<span>TTFT: {formatDuration(values.ttftMs)}</span>
 			<span>TPS: {formatMetric(values.tps, " t/s")}</span>
 			<span>E2E: {formatMetric(values.e2e, " t/s")}</span>
@@ -1048,11 +1051,8 @@ function AssistantMessage() {
 	const modelName = useContext(ModelNameContext) ?? "Assistant";
 	const metrics = useAuiState(
 		(s) =>
-			(
-				s.message.metadata?.custom as
-					| { metrics?: SolarMetrics }
-					| undefined
-			)?.metrics,
+			(s.message.metadata?.custom as { metrics?: SolarMetrics } | undefined)
+				?.metrics,
 	);
 	const timestamp = formatMessageTimestamp(createdAt);
 

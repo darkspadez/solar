@@ -37,7 +37,10 @@ export async function serveMockChatCompletion(req: Request): Promise<Response> {
 	const prompt = lastUserText(body.messages ?? []);
 	const id = `chatcmpl-mock-${Date.now()}`;
 
-	const chunk = (delta: Record<string, unknown>, finishReason: string | null = null) =>
+	const chunk = (
+		delta: Record<string, unknown>,
+		finishReason: string | null = null,
+	) =>
 		encoder.encode(
 			`data: ${JSON.stringify({
 				id,
@@ -48,9 +51,10 @@ export async function serveMockChatCompletion(req: Request): Promise<Response> {
 			})}\n\n`,
 		);
 
-	const reasoning = model === "mock-reasoning"
-		? `Reasoning about: ${prompt}. Step 1: parse. Step 2: consider options. Step 3: answer.`
-		: null;
+	const reasoning =
+		model === "mock-reasoning"
+			? `Reasoning about: ${prompt}. Step 1: parse. Step 2: consider options. Step 3: answer.`
+			: null;
 	const reply =
 		`**Mock reply** (${model}) to: ${prompt}\n\n` +
 		"Inline code `x = 1`, a fenced block:\n\n" +
@@ -84,7 +88,9 @@ export async function serveMockChatCompletion(req: Request): Promise<Response> {
 						choices: [],
 						usage: {
 							prompt_tokens: 1,
-							completion_tokens: tokenize(reply).length + (reasoning ? tokenize(reasoning).length : 0),
+							completion_tokens:
+								tokenize(reply).length +
+								(reasoning ? tokenize(reasoning).length : 0),
 							total_tokens: 1,
 						},
 					})}\n\n`,

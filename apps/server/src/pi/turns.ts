@@ -52,8 +52,9 @@ function contentOf(
 		"content" in message &&
 		typeof (message as { content?: unknown }).content !== "undefined"
 	) {
-		return (message as { content: string | Array<{ type: string; text?: string }> })
-			.content;
+		return (
+			message as { content: string | Array<{ type: string; text?: string }> }
+		).content;
 	}
 	return null;
 }
@@ -158,19 +159,16 @@ function piVisibleTurns(conversationId: string): PiVisibleTurn[] {
 		let target =
 			(latest.firstKeptEntryId
 				? turns.find((turn) =>
-						turn.entries.some(
-							(entry) => entry.id === latest.firstKeptEntryId,
-						),
+						turn.entries.some((entry) => entry.id === latest.firstKeptEntryId),
 					)
 				: undefined) ?? null;
 		if (!target) {
-			const compactionIndex = path.findIndex(
-				(entry) => entry.id === latest.id,
-			);
+			const compactionIndex = path.findIndex((entry) => entry.id === latest.id);
 			const entryIndex = new Map(path.map((entry, i) => [entry.id, i]));
 			target =
 				turns.find(
-					(turn) => (entryIndex.get(turn.entries[0]!.id) ?? -1) > compactionIndex,
+					(turn) =>
+						(entryIndex.get(turn.entries[0]!.id) ?? -1) > compactionIndex,
 				) ?? null;
 		}
 		(target ?? turns.at(-1)!).summaryEvent = summaryEvent;
@@ -220,8 +218,7 @@ function piTurnMetricsByAssistant(
 	for (const entry of manager.getBranch()) {
 		if (
 			entry.type === "custom" &&
-			(entry as { customType?: string }).customType ===
-				"solar-turn-metrics"
+			(entry as { customType?: string }).customType === "solar-turn-metrics"
 		) {
 			const data = (entry as { data?: PiTurnMetricsRecord }).data;
 			if (data?.assistantEntryId) {
@@ -231,8 +228,6 @@ function piTurnMetricsByAssistant(
 	}
 	return byAssistant;
 }
-
-
 
 interface PiToolCall {
 	id: string;
@@ -255,7 +250,9 @@ export async function loadPiMessages(userId: string, conversationId: string) {
 	const turnMetrics = piTurnMetricsByAssistant(conversationId);
 
 	const toolCallsByTurn = turns.map(extractPiToolCalls);
-	const toolNames = [...new Set(toolCallsByTurn.flat().map((call) => call.name))];
+	const toolNames = [
+		...new Set(toolCallsByTurn.flat().map((call) => call.name)),
+	];
 	const displayNames = await describeToolNames(toolNames);
 
 	const rows = [];
@@ -289,9 +286,7 @@ export async function loadPiMessages(userId: string, conversationId: string) {
 			id: turn.id,
 			role: turn.role,
 			text: entryTexts.join("\n"),
-			parts: JSON.stringify(
-				withMetrics(last, turnMetrics.get(last.id)),
-			),
+			parts: JSON.stringify(withMetrics(last, turnMetrics.get(last.id))),
 			status: "complete",
 			createdAt: turn.entries[0]!.timestamp,
 			reasoning: reasoning.join("\n"),
@@ -304,7 +299,8 @@ export async function loadPiMessages(userId: string, conversationId: string) {
 			attachments,
 			// Only a generation currently pumping into this conversation makes
 			// the trailing assistant turn live; the SSE id differs (see API).
-			isActive: isLive && index === turns.length - 1 && turn.role === "assistant",
+			isActive:
+				isLive && index === turns.length - 1 && turn.role === "assistant",
 		});
 	}
 	return rows;
@@ -408,9 +404,7 @@ export function piConversationMatchesQuery(
 	return manager
 		.getBranch()
 		.filter((entry): entry is SessionMessageEntry => entry.type === "message")
-		.some((entry) =>
-			entryText(entry).toLocaleLowerCase().includes(needle),
-		);
+		.some((entry) => entryText(entry).toLocaleLowerCase().includes(needle));
 }
 
 // ---------------------------------------------------------------------------
@@ -461,11 +455,20 @@ export function piConversationUsage(conversationId: string): PiUsageSummary {
 				cacheRead: usage.cacheRead ?? 0,
 			};
 		} else if (entry.type === "compaction") {
-			const usage = (entry as { usage?: { input?: number; output?: number; cost?: { total?: number } } }).usage;
+			const usage = (
+				entry as {
+					usage?: {
+						input?: number;
+						output?: number;
+						cost?: { total?: number };
+					};
+				}
+			).usage;
 			if (!usage) continue;
 			summary.inputTokens += usage.input ?? 0;
 			summary.outputTokens += usage.output ?? 0;
-			if (usage.cost?.total) summary.costMicros += Math.round(usage.cost.total * 1_000_000);
+			if (usage.cost?.total)
+				summary.costMicros += Math.round(usage.cost.total * 1_000_000);
 		}
 	}
 	summary.lastConversationTokens = lastAssistantUsage

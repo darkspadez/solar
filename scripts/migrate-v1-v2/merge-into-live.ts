@@ -52,17 +52,22 @@ function tableExists(db: Database, table: string): boolean {
 }
 
 function columns(db: Database, table: string): string[] {
-	return (db.query(`pragma table_info("${table}")`).all() as { name: string }[]).map(
-		(row) => row.name,
-	);
+	return (
+		db.query(`pragma table_info("${table}")`).all() as { name: string }[]
+	).map((row) => row.name);
 }
 
 function rowCount(db: Database, table: string): number {
-	return (db.query(`select count(*) as count from "${table}"`).get() as { count: number })
-		.count;
+	return (
+		db.query(`select count(*) as count from "${table}"`).get() as {
+			count: number;
+		}
+	).count;
 }
 
-export async function mergeIntoLive(options: MergeOptions): Promise<MergeReport> {
+export async function mergeIntoLive(
+	options: MergeOptions,
+): Promise<MergeReport> {
 	const migrated = new Database(options.migratedDb, { readonly: true });
 	const live = new Database(options.liveDb);
 	live.exec("PRAGMA foreign_keys = ON");

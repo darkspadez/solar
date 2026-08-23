@@ -13,7 +13,10 @@
  */
 import { parseArgs } from "node:util";
 import { db } from "../apps/server/src/db";
-import { importConversation, isPiSessionReady } from "../apps/server/src/pi/migration";
+import {
+	importConversation,
+	isPiSessionReady,
+} from "../apps/server/src/pi/migration";
 
 const { values } = parseArgs({
 	args: Bun.argv,
@@ -66,7 +69,9 @@ async function worker() {
 		await processConversation(row);
 		started++;
 		if (started % 25 === 0) {
-			console.log(`progress: ${started}/${total} (failures: ${failures.length})`);
+			console.log(
+				`progress: ${started}/${total} (failures: ${failures.length})`,
+			);
 		}
 	}
 }

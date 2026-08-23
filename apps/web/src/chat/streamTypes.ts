@@ -27,6 +27,6 @@ export type UiChunk =
 				cacheReadTokens?: number;
 				cacheWriteTokens?: number;
 			};
-		  }
+	  }
 	| { type: "title-update"; title: string }
 	| { type: "error"; errorText: string };

@@ -5,7 +5,11 @@
  * the legacy engine.
  */
 import type { Context } from "@earendil-works/pi-ai";
-import { resolveModel, type ModelSelection } from "../chat/catalog";
+import {
+	mockForcedSelection,
+	resolveModel,
+	type ModelSelection,
+} from "../chat/catalog";
 import { streamModel } from "../chat/catalog";
 
 export async function generatePiTitleText(
@@ -13,6 +17,9 @@ export async function generatePiTitleText(
 	prompt: string,
 	selection: ModelSelection,
 ): Promise<string | null> {
+	// Mock-mode guard: titles are opportunistic background LLM calls and must
+	// never reach a live provider in dev (SOLAR_MOCK_LLM).
+	selection = mockForcedSelection(selection);
 	const finalPrompt = prompt.replaceAll("{{first_message}}", firstMessage);
 	// Mock dev generator: echo back a bounded, title-shaped string so the UI
 	// path works without a provider.

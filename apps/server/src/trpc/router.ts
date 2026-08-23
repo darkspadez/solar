@@ -56,10 +56,7 @@ import { SourceCategoryResolver } from "../sources/categories";
 import { parseSkill } from "../chat/skills";
 import { chatV2Repository } from "../chat-v2/db/repository";
 import { piCompact, piDeleteConversation } from "../pi/engine";
-import {
-	importConversation,
-	isPiSessionReady,
-} from "../pi/migration";
+import { importConversation, isPiSessionReady } from "../pi/migration";
 import { buildPiExportBundle } from "../pi/export";
 import { piModelCapabilities, syncPiModelConfig } from "../pi/models";
 import {
@@ -136,7 +133,15 @@ const conversationRouter = router({
 			}),
 		)
 		.mutation(async ({ ctx, input }) => {
-			await chatV2Repository.deleteAbandonedConversations(ctx.user.id);
+			const persistedConversationIds = (
+				await chatV2Repository.listConversations(ctx.user.id)
+			)
+				.filter((conversation) => isPiSessionReady(conversation.id))
+				.map((conversation) => conversation.id);
+			await chatV2Repository.deleteAbandonedConversations(
+				ctx.user.id,
+				persistedConversationIds,
+			);
 			const presetId =
 				input.presetId ?? (await getUserDefaultPreset(ctx.user.id));
 			// Snapshot the preset (model + system prompt + reasoning params) onto the
@@ -256,15 +261,15 @@ const conversationRouter = router({
 				estimatedTokens: latest?.tokensBefore ?? null,
 				summarized: latest !== null,
 				jobError: null,
-			summaryEvent: latest
-				? {
-						tokensBefore: latest.tokensBefore,
-						tokensAfter: latest.usageOutput ?? null,
-						revision: latest.revision,
-						createdAt: latest.createdAt,
-						retainedMessageBoundaryId: null,
-					}
-				: null,
+				summaryEvent: latest
+					? {
+							tokensBefore: latest.tokensBefore,
+							tokensAfter: latest.usageOutput ?? null,
+							revision: latest.revision,
+							createdAt: latest.createdAt,
+							retainedMessageBoundaryId: null,
+						}
+					: null,
 			};
 		}),
 
@@ -499,7 +504,12 @@ const conversationRouter = router({
 					const text =
 						typeof record.message.content === "string"
 							? record.message.content
-							: (record.message.content as Array<{ type?: string; text?: string }>)
+							: (
+									record.message.content as Array<{
+										type?: string;
+										text?: string;
+									}>
+								)
 									.filter((part) => part.type === "text")
 									.map((part) => part.text ?? "")
 									.join("\n");
@@ -1341,15 +1351,18 @@ const adminRouter = router({
 			.selectFrom("v2_conversation")
 			.select(["id", "userId", "provider", "modelId"])
 			.execute();
-		const buckets = new Map<string, {
-			userId: string;
-			name: string;
-			email: string;
-			model: string;
-			messageCount: number;
-			inputTokens: number;
-			outputTokens: number;
-		}>();
+		const buckets = new Map<
+			string,
+			{
+				userId: string;
+				name: string;
+				email: string;
+				model: string;
+				messageCount: number;
+				inputTokens: number;
+				outputTokens: number;
+			}
+		>();
 		for (const row of conversations) {
 			if (!isPiSessionReady(row.id)) continue;
 			const usage = piConversationUsage(row.id);
@@ -1373,7 +1386,8 @@ const adminRouter = router({
 			buckets.set(key, bucket);
 		}
 		return [...buckets.values()].sort(
-			(a, b) => a.email.localeCompare(b.email) || a.model.localeCompare(b.model),
+			(a, b) =>
+				a.email.localeCompare(b.email) || a.model.localeCompare(b.model),
 		);
 	}),
 });

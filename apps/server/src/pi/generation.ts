@@ -79,7 +79,10 @@ class PiGenerationRegistry {
 
 	isConversationGenerating(conversationId: string): boolean {
 		for (const generation of this.generations.values()) {
-			if (generation.conversationId === conversationId && generation.status === "running")
+			if (
+				generation.conversationId === conversationId &&
+				generation.status === "running"
+			)
 				return true;
 		}
 		return false;
@@ -157,7 +160,10 @@ class PiGenerationRegistry {
 					},
 				};
 				generation.subscribers.add(subscriber);
-				heartbeatTimer = setInterval(() => subscriber?.heartbeat(), HEARTBEAT_MS);
+				heartbeatTimer = setInterval(
+					() => subscriber?.heartbeat(),
+					HEARTBEAT_MS,
+				);
 			},
 			cancel: () => {
 				clearHeartbeat();

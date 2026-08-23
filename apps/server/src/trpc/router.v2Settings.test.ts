@@ -20,8 +20,15 @@ mock.module("../chat/attachments", () => ({
 }));
 mock.module("../logger", () => ({
 	logger: {
-		withMetadata: () => ({ trace: () => {}, info: () => {}, warn: () => {}, error: () => {} }),
-		withError: () => ({ withMetadata: () => ({ warn: () => {}, error: () => {} }) }),
+		withMetadata: () => ({
+			trace: () => {},
+			info: () => {},
+			warn: () => {},
+			error: () => {},
+		}),
+		withError: () => ({
+			withMetadata: () => ({ warn: () => {}, error: () => {} }),
+		}),
 	},
 	getLogLevel: () => "info",
 	setLogLevel: () => {},
@@ -43,14 +50,18 @@ mock.module("../chat/catalog", () => ({
 	PROVIDER_APIS: ["openai-responses"],
 	parseAllowlist: () => [],
 	listAvailableModels: async () => [MODEL_DESCRIPTOR],
-	resolveSelection: async (
-		selection: { provider?: string; endpointId?: string; modelId?: string; api?: string },
-	) => ({
+	resolveSelection: async (selection: {
+		provider?: string;
+		endpointId?: string;
+		modelId?: string;
+		api?: string;
+	}) => ({
 		provider: selection.provider ?? MODEL_DESCRIPTOR.provider,
 		endpointId: selection.endpointId ?? MODEL_DESCRIPTOR.endpointId,
 		modelId: selection.modelId ?? MODEL_DESCRIPTOR.modelId,
 		api: selection.api ?? MODEL_DESCRIPTOR.api,
 	}),
+	mockForcedSelection: (selection: unknown) => selection,
 	resolveModel: async () => {
 		throw new Error("resolveModel should not be called in this test");
 	},
@@ -65,7 +76,10 @@ mock.module("../chat/catalog", () => ({
 		defaultVerbosity: null,
 	}),
 	documentInputMimeTypes: async () => [],
-	documentInputCapabilities: async () => ({ nativeMimeTypes: [], extractedTextMimeTypes: [] }),
+	documentInputCapabilities: async () => ({
+		nativeMimeTypes: [],
+		extractedTextMimeTypes: [],
+	}),
 	getUserDefault: async () => null,
 	setUserDefault: async () => {},
 	getUserDefaultPreset: async () => null,
@@ -87,7 +101,9 @@ const { appRouter } = await import("./router");
 const { chatV2Repository } = await import("../chat-v2/db/repository");
 
 function caller() {
-	return appRouter.createCaller({ user: { id: USER_ID, role: "user" } } as never);
+	return appRouter.createCaller({
+		user: { id: USER_ID, role: "user" },
+	} as never);
 }
 
 describe("chat-v2 conversation settings wiring", () => {
@@ -149,8 +165,11 @@ describe("chat-v2 conversation settings wiring", () => {
 			displayMode: "timeline",
 		});
 		expect(
-			(await rpc.conversation.getDisplayMode({ conversationId: conversation.id }))
-				.displayMode,
+			(
+				await rpc.conversation.getDisplayMode({
+					conversationId: conversation.id,
+				})
+			).displayMode,
 		).toBe("timeline");
 	});
 
@@ -253,9 +272,7 @@ describe("chat-v2 conversation settings wiring", () => {
 
 		await rpc.folder.remove({ id: folder.id });
 		expect(await rpc.folder.list()).toEqual([]);
-		expect(
-			(await rpc.conversation.list())[0]?.folderId,
-		).toBeNull();
+		expect((await rpc.conversation.list())[0]?.folderId).toBeNull();
 
 		await rpc.tag.remove({ id: tag.id });
 		expect(await rpc.tag.list()).toEqual([]);
@@ -276,7 +293,9 @@ describe("chat-v2 conversation settings wiring", () => {
 	});
 
 	test("folder and tag mutations reject ownership across users", async () => {
-		const folder = await chatV2Repository.createFolder(USER_ID, { name: "Mine" });
+		const folder = await chatV2Repository.createFolder(USER_ID, {
+			name: "Mine",
+		});
 		const tag = await chatV2Repository.createTag(USER_ID, { name: "mine" });
 		const otherCaller = appRouter.createCaller({
 			user: { id: "someone-else", role: "user" },
@@ -285,7 +304,9 @@ describe("chat-v2 conversation settings wiring", () => {
 		await expect(
 			otherCaller.folder.rename({ id: folder.id, name: "Hijacked" }),
 		).rejects.toThrow();
-		await expect(otherCaller.folder.remove({ id: folder.id })).rejects.toThrow();
+		await expect(
+			otherCaller.folder.remove({ id: folder.id }),
+		).rejects.toThrow();
 		await expect(otherCaller.tag.remove({ id: tag.id })).rejects.toThrow();
 	});
 });

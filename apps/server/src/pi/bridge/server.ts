@@ -11,7 +11,10 @@ import {
 	expandAttachmentRows,
 	type AttachmentContentRow,
 } from "../../chat/attachments";
-import { documentInputCapabilities, resolveSelection } from "../../chat/catalog";
+import {
+	documentInputCapabilities,
+	resolveSelection,
+} from "../../chat/catalog";
 import type { ResolvedTool } from "../../chat/mcp";
 import { toolProvider } from "../../chat/tools";
 import { chatV2Repository } from "../../chat-v2/db/repository";
@@ -22,7 +25,9 @@ import { resolveBridgeToken, type BridgeIdentity } from "./tokens";
 
 export const piBridgeRoutes = new Hono();
 
-function authenticate(authorization: string | undefined): BridgeIdentity | null {
+function authenticate(
+	authorization: string | undefined,
+): BridgeIdentity | null {
 	if (!authorization?.startsWith("Bearer ")) return null;
 	return resolveBridgeToken(authorization.slice("Bearer ".length));
 }
@@ -47,7 +52,9 @@ const TOOL_CACHE_MS = 60_000;
 const toolCache = new Map<string, { at: number; tools: ResolvedTool[] }>();
 
 /** Engine-side accessor for the current cached tool set (may be empty). */
-export function peekResolvedTools(conversationId: string): ResolvedTool[] | null {
+export function peekResolvedTools(
+	conversationId: string,
+): ResolvedTool[] | null {
 	const cached = toolCache.get(conversationId);
 	return cached && Date.now() - cached.at < TOOL_CACHE_MS ? cached.tools : null;
 }

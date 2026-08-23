@@ -229,7 +229,10 @@ test("uses the user's default preset for new chats", async ({ page }) => {
 	await preset.getByRole("button").first().click();
 	await expect(preset.locator("button.text-warning")).toBeVisible();
 	await page.getByRole("button", { name: "Close" }).click();
-	await page.getByRole("button", { name: "New chat", exact: true }).first().click();
+	await page
+		.getByRole("button", { name: "New chat", exact: true })
+		.first()
+		.click();
 	// The model switcher is a dropdown in the page title bar (see
 	// ModelPicker.tsx); assert the presets' default model selection landed.
 	await expect(
