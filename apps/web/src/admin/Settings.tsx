@@ -3,6 +3,8 @@ import { Settings2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useSession } from "../auth";
 import { useTRPC } from "../trpc";
+import { newId } from "../id";
+import { copyText } from "../clipboard";
 
 interface AllowlistEntry {
 	id: string;
@@ -678,7 +680,7 @@ function ProviderCard({ initial }: { initial: ProviderForm }) {
 		setEndpoints((current) => [
 			...current,
 			{
-				id: crypto.randomUUID(),
+				id: newId(),
 				label: "",
 				baseUrl: "",
 				api:
@@ -1408,7 +1410,7 @@ function ApiKeys() {
 						</div>
 						<button
 							className="btn btn-sm"
-							onClick={() => void navigator.clipboard.writeText(revealedKey)}
+							onClick={() => void copyText(revealedKey)}
 						>
 							Copy
 						</button>

@@ -20,6 +20,7 @@ import {
 import {
 	CanonicalMessageValidationError,
 	parseCanonicalMessage,
+	repairDanglingToolCalls,
 	validateMessageSequence,
 	zeroUsage,
 } from "../validation";
@@ -385,7 +386,11 @@ export class ChatV2Repository {
 			.execute();
 	}
 
-	async renameFolder(userId: string, folderId: string, name: string): Promise<void> {
+	async renameFolder(
+		userId: string,
+		folderId: string,
+		name: string,
+	): Promise<void> {
 		const result = await this.db
 			.updateTable("v2_folder")
 			.set({ name })
@@ -655,9 +660,13 @@ export class ChatV2Repository {
 	}
 
 	/** Discards the user's abandoned drafts (conversations with no turns at
-	 * all) so they never accumulate. */
-	async deleteAbandonedConversations(userId: string): Promise<void> {
-		const abandoned = await this.db
+	 * all) so they never accumulate. Pi-backed conversations are preserved
+	 * because their canonical turns live in the pi session, not this table. */
+	async deleteAbandonedConversations(
+		userId: string,
+		preservedConversationIds: readonly string[] = [],
+	): Promise<void> {
+		let abandonedQuery = this.db
 			.selectFrom("v2_conversation as conversation")
 			.select("conversation.id")
 			.where("conversation.userId", "=", userId)
@@ -674,8 +683,15 @@ export class ChatV2Repository {
 							),
 					),
 				),
-			)
-			.execute();
+			);
+		if (preservedConversationIds.length > 0) {
+			abandonedQuery = abandonedQuery.where(
+				"conversation.id",
+				"not in",
+				preservedConversationIds,
+			);
+		}
+		const abandoned = await abandonedQuery.execute();
 		if (abandoned.length === 0) return;
 		await this.db
 			.deleteFrom("v2_conversation")
@@ -1281,8 +1297,7 @@ export class ChatV2Repository {
 			.where("ordinal", "=", userTurn.ordinal + 1)
 			.where("role", "=", "assistant")
 			.executeTakeFirst();
-		if (!assistantTurn)
-			throw new V2NotFoundError("turn", userTurnId);
+		if (!assistantTurn) throw new V2NotFoundError("turn", userTurnId);
 		return assistantTurn;
 	}
 
@@ -2033,16 +2048,20 @@ export class ChatV2Repository {
 				createdAt: row.createdAt,
 			};
 		});
+		// Archive tolerance: frozen conversations can end in a dangling tool
+		// call (aborted/failed generation). Repair those in memory before the
+		// strict pairing validation runs so export/migration stay possible.
+		const repaired = repairDanglingToolCalls(records);
 		validateMessageSequence(
-			records.map((record) => record.message),
-			records.map((record) => ({
+			repaired.map((record) => record.message),
+			repaired.map((record) => ({
 				conversationId,
 				turnId: record.turnId ?? undefined,
 				messageId: record.id,
 				ordinal: record.ordinal,
 			})),
 		);
-		return records;
+		return repaired;
 	}
 
 	private async invalidateCompactionsIntersectingInTransaction(
@@ -2283,3 +2302,7 @@ export class ChatV2Repository {
 		return record as ContextCompactionJobRecord;
 	}
 }
+
+/** Process-wide repository handle (moved here from chat/v2Live.ts). */
+import { db } from "../../db";
+export const chatV2Repository = new ChatV2Repository(db);

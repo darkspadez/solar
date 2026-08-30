@@ -18,13 +18,17 @@ mock.module("../chat/attachments", () => ({
 	deleteAttachmentFilesByStorageKey: async () => {},
 	expandAttachmentRows: async () => ({ parts: [], documents: [] }),
 }));
-mock.module("../chat/generationManager", () => ({
-	generationManager: { isActive: () => false },
-}));
 mock.module("../logger", () => ({
 	logger: {
-		withMetadata: () => ({ trace: () => {}, info: () => {}, warn: () => {}, error: () => {} }),
-		withError: () => ({ withMetadata: () => ({ warn: () => {}, error: () => {} }) }),
+		withMetadata: () => ({
+			trace: () => {},
+			info: () => {},
+			warn: () => {},
+			error: () => {},
+		}),
+		withError: () => ({
+			withMetadata: () => ({ warn: () => {}, error: () => {} }),
+		}),
 	},
 	getLogLevel: () => "info",
 	setLogLevel: () => {},
@@ -46,14 +50,18 @@ mock.module("../chat/catalog", () => ({
 	PROVIDER_APIS: ["openai-responses"],
 	parseAllowlist: () => [],
 	listAvailableModels: async () => [MODEL_DESCRIPTOR],
-	resolveSelection: async (
-		selection: { provider?: string; endpointId?: string; modelId?: string; api?: string },
-	) => ({
+	resolveSelection: async (selection: {
+		provider?: string;
+		endpointId?: string;
+		modelId?: string;
+		api?: string;
+	}) => ({
 		provider: selection.provider ?? MODEL_DESCRIPTOR.provider,
 		endpointId: selection.endpointId ?? MODEL_DESCRIPTOR.endpointId,
 		modelId: selection.modelId ?? MODEL_DESCRIPTOR.modelId,
 		api: selection.api ?? MODEL_DESCRIPTOR.api,
 	}),
+	mockForcedSelection: (selection: unknown) => selection,
 	resolveModel: async () => {
 		throw new Error("resolveModel should not be called in this test");
 	},
@@ -68,7 +76,10 @@ mock.module("../chat/catalog", () => ({
 		defaultVerbosity: null,
 	}),
 	documentInputMimeTypes: async () => [],
-	documentInputCapabilities: async () => ({ nativeMimeTypes: [], extractedTextMimeTypes: [] }),
+	documentInputCapabilities: async () => ({
+		nativeMimeTypes: [],
+		extractedTextMimeTypes: [],
+	}),
 	getUserDefault: async () => null,
 	setUserDefault: async () => {},
 	getUserDefaultPreset: async () => null,
@@ -83,13 +94,16 @@ mock.module("../chat/catalog", () => ({
 	setTitlePrompt: async () => {},
 	importProviderModels: async () => {},
 	loadProviderConfigs: async () => [],
+	normalizeBaseUrlForApi: () => "",
 }));
 
 const { appRouter } = await import("./router");
-const { chatV2Repository } = await import("../chat/v2Live");
+const { chatV2Repository } = await import("../chat-v2/db/repository");
 
 function caller() {
-	return appRouter.createCaller({ user: { id: USER_ID, role: "user" } } as never);
+	return appRouter.createCaller({
+		user: { id: USER_ID, role: "user" },
+	} as never);
 }
 
 describe("chat-v2 conversation settings wiring", () => {
@@ -151,8 +165,11 @@ describe("chat-v2 conversation settings wiring", () => {
 			displayMode: "timeline",
 		});
 		expect(
-			(await rpc.conversation.getDisplayMode({ conversationId: conversation.id }))
-				.displayMode,
+			(
+				await rpc.conversation.getDisplayMode({
+					conversationId: conversation.id,
+				})
+			).displayMode,
 		).toBe("timeline");
 	});
 
@@ -255,15 +272,13 @@ describe("chat-v2 conversation settings wiring", () => {
 
 		await rpc.folder.remove({ id: folder.id });
 		expect(await rpc.folder.list()).toEqual([]);
-		expect(
-			(await rpc.conversation.list())[0]?.folderId,
-		).toBeNull();
+		expect((await rpc.conversation.list())[0]?.folderId).toBeNull();
 
 		await rpc.tag.remove({ id: tag.id });
 		expect(await rpc.tag.list()).toEqual([]);
 	});
 
-	test("metrics records and sums provider call telemetry for a v2 conversation", async () => {
+	test("metrics is empty for a conversation without a pi session", async () => {
 		const conversation = await chatV2Repository.createConversation(USER_ID, {
 			title: "Metrics chat",
 			provider: "mock",
@@ -272,39 +287,15 @@ describe("chat-v2 conversation settings wiring", () => {
 			modelApi: "mock",
 		});
 		const rpc = caller();
-
-		// No usage recorded yet.
-		expect(await rpc.conversation.metrics({ conversationId: conversation.id })).toMatchObject({
-			contextTokens: null,
-		});
-
-		// Regression test: provider_call_telemetry previously had foreign keys
-		// into the removed v1 conversation/message tables, so every insert with
-		// a v2 conversation/turn id failed with SQLITE_CONSTRAINT_FOREIGNKEY.
-		await database.db
-			.insertInto("provider_call_telemetry")
-			.values({
-				id: "telemetry-1",
-				conversationId: conversation.id,
-				messageId: "not-a-real-turn-id",
-				purpose: "chat",
-				provider: "mock",
-				api: "mock",
-				modelId: "mock",
-				inputTokens: 100,
-				outputTokens: 20,
-				cacheReadTokens: 0,
-				estimatedCostMicros: 50,
-			})
-			.execute();
-
-		const metrics = await rpc.conversation.metrics({ conversationId: conversation.id });
-		expect(metrics.contextTokens).toBe(100);
-		expect(metrics.costMicros).toBe(50);
+		expect(
+			await rpc.conversation.metrics({ conversationId: conversation.id }),
+		).toMatchObject({ contextTokens: null, costMicros: 0 });
 	});
 
 	test("folder and tag mutations reject ownership across users", async () => {
-		const folder = await chatV2Repository.createFolder(USER_ID, { name: "Mine" });
+		const folder = await chatV2Repository.createFolder(USER_ID, {
+			name: "Mine",
+		});
 		const tag = await chatV2Repository.createTag(USER_ID, { name: "mine" });
 		const otherCaller = appRouter.createCaller({
 			user: { id: "someone-else", role: "user" },
@@ -313,7 +304,9 @@ describe("chat-v2 conversation settings wiring", () => {
 		await expect(
 			otherCaller.folder.rename({ id: folder.id, name: "Hijacked" }),
 		).rejects.toThrow();
-		await expect(otherCaller.folder.remove({ id: folder.id })).rejects.toThrow();
+		await expect(
+			otherCaller.folder.remove({ id: folder.id }),
+		).rejects.toThrow();
 		await expect(otherCaller.tag.remove({ id: tag.id })).rejects.toThrow();
 	});
 });

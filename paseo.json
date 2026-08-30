@@ -28,7 +28,10 @@
       "command": "biome format ."
     },
     "deploy:staging": {
-      "command": "bun run scripts/deploy-staging.ts"
+      "command": "bun run scripts/deploy.ts staging"
+    },
+    "deploy:production": {
+      "command": "bun run scripts/deploy.ts production"
     },
     "migrate": {
       "command": "bun run --cwd apps/server migrate"

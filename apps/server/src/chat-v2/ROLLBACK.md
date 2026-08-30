@@ -1,10 +1,13 @@
-# Chat V2 Rollback
+# Chat and Migration Rollback
 
-V1 remains the live production path. Chat V2 is a runtime-ready module only:
-it has no live routes or UI wiring, and no v1-to-v2 migration has run.
+The pi engine is the live production path. Chat-v2 is retained as a frozen
+archive and import source; it is not an alternate live generation engine.
 
-Before migration, rollback means retain and restart the preserved v1 deployment
-against its unchanged SQLite database and attachment root. Do not point v1 at
-the v2 tables or attachment root. Keep a consistent v1 database snapshot,
-including SQLite WAL/SHM files when applicable, and the matching attachment
-snapshot until migration acceptance is complete.
+For a deployment rollback, stop the service and restore matching snapshots of
+the SQLite database, attachment root, and `${SOLAR_PI_AGENT_DIR}`. Do not restore
+SQLite without the corresponding pi sessions: the database contains ownership
+and configuration, while pi JSONL contains canonical conversation content.
+
+The legacy importer (`scripts/import-chat-v2-to-pi.ts`) is idempotent and may be
+run again after restoring a chat-v2 archive, but it must use the same
+`DATABASE_PATH` and `SOLAR_PI_AGENT_DIR` as the server.

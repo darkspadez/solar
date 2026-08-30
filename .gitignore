@@ -26,6 +26,9 @@ solar.db-wal
 # Uploaded attachment files (Mirage DiskResource data dir)
 apps/server/data/
 
+# pi session/agent state (e2e webserver runs from repo root)
+pi-agent/
+
 # Docker Compose persistent state
 data/
 

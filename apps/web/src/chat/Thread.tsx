@@ -10,7 +10,6 @@ import {
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
 	Brain,
-	Ban,
 	Bot,
 	Camera,
 	Check,
@@ -21,7 +20,6 @@ import {
 	FileText,
 	FileUp,
 	Image,
-	LoaderCircle,
 	Plus,
 	Podcast,
 	Repeat2,
@@ -984,7 +982,10 @@ function AssistantMetrics({ metrics }: { metrics?: SolarMetrics }) {
 		cacheWriteTokens: null,
 	};
 	return (
-		<span className="solar-metrics" title="Response performance and token usage">
+		<span
+			className="solar-metrics"
+			title="Response performance and token usage"
+		>
 			<span>TTFT: {formatDuration(values.ttftMs)}</span>
 			<span>TPS: {formatMetric(values.tps, " t/s")}</span>
 			<span>E2E: {formatMetric(values.e2e, " t/s")}</span>
@@ -1042,25 +1043,6 @@ function AssistantMessage() {
 					| undefined
 			)?.toolCalls,
 	);
-	const staleTurn = useAuiState(
-		(s) =>
-			(
-				s.message.metadata?.custom as
-					| {
-							isStale?: boolean;
-							forceStop?: () => Promise<void>;
-					  }
-					| undefined
-			)?.isStale,
-	);
-	const forceStop = useAuiState(
-		(s) =>
-			(
-				s.message.metadata?.custom as
-					| { forceStop?: () => Promise<void> }
-					| undefined
-			)?.forceStop,
-	);
 	const createdAt = useAuiState(
 		(s) =>
 			(s.message.metadata?.custom as { createdAt?: string } | undefined)
@@ -1069,11 +1051,8 @@ function AssistantMessage() {
 	const modelName = useContext(ModelNameContext) ?? "Assistant";
 	const metrics = useAuiState(
 		(s) =>
-			(
-				s.message.metadata?.custom as
-					| { metrics?: SolarMetrics }
-					| undefined
-			)?.metrics,
+			(s.message.metadata?.custom as { metrics?: SolarMetrics } | undefined)
+				?.metrics,
 	);
 	const timestamp = formatMessageTimestamp(createdAt);
 
@@ -1104,8 +1083,6 @@ function AssistantMessage() {
 								<EmptyAssistantResponse
 									isRunning={isRunning}
 									connectionStatus={connectionStatus}
-									isStale={staleTurn}
-									onForceStop={forceStop}
 								/>
 							) : (
 								<MessagePrimitive.Content
@@ -1120,8 +1097,6 @@ function AssistantMessage() {
 							<EmptyAssistantResponse
 								isRunning={isRunning}
 								connectionStatus={connectionStatus}
-								isStale={staleTurn}
-								onForceStop={forceStop}
 							/>
 						) : (
 							parseTimelineItems(
@@ -1181,36 +1156,10 @@ function AssistantMessage() {
 
 export function EmptyAssistantResponse({
 	isRunning,
-	connectionStatus,
-	isStale = false,
-	onForceStop,
 }: {
 	isRunning: boolean;
 	connectionStatus?: SolarConnectionStatus;
-	isStale?: boolean;
-	onForceStop?: () => Promise<void>;
 }) {
-	const [forceStopHovered, setForceStopHovered] = useState(false);
-
-	if (isStale && onForceStop) {
-		return (
-			<button
-				type="button"
-				className="btn btn-ghost btn-sm btn-square"
-				title="Force stop response"
-				onClick={() => void onForceStop()}
-				onMouseEnter={() => setForceStopHovered(true)}
-				onMouseLeave={() => setForceStopHovered(false)}
-			>
-				{forceStopHovered ? (
-					<Ban className="text-error" size={18} />
-				) : (
-					<LoaderCircle className="solar-response-loader" size={18} />
-				)}
-			</button>
-		);
-	}
-
 	if (isRunning) {
 		return null;
 	}
@@ -1673,6 +1622,15 @@ export function Thread({
 									}
 								>
 									<ThreadPrimitive.If running>
+										{/* Queueing stays available mid-run: sending while the composer
+										    shows Interrupt enqueues the next message via the queue
+										    adapter and it fires when the active response settles. */}
+										<ComposerPrimitive.Send
+											className="btn btn-outline btn-sm btn-circle"
+											title="Send or queue message"
+										>
+											<Send size={18} />
+										</ComposerPrimitive.Send>
 										<ComposerPrimitive.Cancel
 											className="btn btn-error btn-sm btn-circle"
 											title="Interrupt response"

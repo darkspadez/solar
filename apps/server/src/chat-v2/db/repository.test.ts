@@ -379,6 +379,29 @@ describe("chat-v2 database", () => {
 		]);
 	});
 
+	test("preserves pi-backed drafts while deleting empty drafts", async () => {
+		const { repository } = await repositoryFixture();
+		const persisted = await repository.createConversation(USER_A, {
+			id: "persisted-conversation",
+			title: "Persisted",
+		});
+		const abandoned = await repository.createConversation(USER_A, {
+			id: "abandoned-conversation",
+			title: "Abandoned",
+		});
+
+		await repository.deleteAbandonedConversations(USER_A, [persisted.id]);
+
+		expect(
+			(await repository.listConversations(USER_A)).map(
+				(conversation) => conversation.id,
+			),
+		).toEqual([persisted.id]);
+		await expect(
+			repository.getConversation(USER_A, abandoned.id),
+		).rejects.toBeInstanceOf(V2NotFoundError);
+	});
+
 	test("persists per-conversation model, effort, verbosity, display mode, and MCP settings", async () => {
 		const { repository } = await repositoryFixture();
 		const conversation = await repository.createConversation(USER_A, {
@@ -391,12 +414,24 @@ describe("chat-v2 database", () => {
 			modelId: "gpt-5.6",
 			modelApi: "openai-responses",
 		});
-		await repository.setConversationGenerationSettings(USER_A, conversation.id, {
-			reasoningEffort: "high",
-			verbosity: "low",
-		});
-		await repository.setConversationDisplayMode(USER_A, conversation.id, "timeline");
-		await repository.setConversationAutoExecuteTools(USER_A, conversation.id, false);
+		await repository.setConversationGenerationSettings(
+			USER_A,
+			conversation.id,
+			{
+				reasoningEffort: "high",
+				verbosity: "low",
+			},
+		);
+		await repository.setConversationDisplayMode(
+			USER_A,
+			conversation.id,
+			"timeline",
+		);
+		await repository.setConversationAutoExecuteTools(
+			USER_A,
+			conversation.id,
+			false,
+		);
 
 		const reloaded = await repository.getConversation(USER_A, conversation.id);
 		expect(reloaded.provider).toBe("openai");
@@ -409,10 +444,17 @@ describe("chat-v2 database", () => {
 		expect(reloaded.autoExecuteTools).toBe(0);
 
 		// Partial updates leave previously set fields untouched.
-		await repository.setConversationGenerationSettings(USER_A, conversation.id, {
-			verbosity: "high",
-		});
-		const afterPartialUpdate = await repository.getConversation(USER_A, conversation.id);
+		await repository.setConversationGenerationSettings(
+			USER_A,
+			conversation.id,
+			{
+				verbosity: "high",
+			},
+		);
+		const afterPartialUpdate = await repository.getConversation(
+			USER_A,
+			conversation.id,
+		);
 		expect(afterPartialUpdate.reasoningEffort).toBe("high");
 		expect(afterPartialUpdate.verbosity).toBe("high");
 
@@ -449,7 +491,12 @@ describe("chat-v2 database", () => {
 			})
 			.execute();
 
-		await repository.setConversationMcpServer(USER_A, conversation.id, "server-1", true);
+		await repository.setConversationMcpServer(
+			USER_A,
+			conversation.id,
+			"server-1",
+			true,
+		);
 		expect(
 			await repository.listConversationMcpServers(USER_A, conversation.id),
 		).toEqual([{ serverId: "server-1", enabled: true }]);
@@ -457,7 +504,12 @@ describe("chat-v2 database", () => {
 			await repository.listConversationMcpServers(USER_A, otherConversation.id),
 		).toEqual([]);
 
-		await repository.setConversationMcpServer(USER_A, conversation.id, "server-1", false);
+		await repository.setConversationMcpServer(
+			USER_A,
+			conversation.id,
+			"server-1",
+			false,
+		);
 		expect(
 			await repository.listConversationMcpServers(USER_A, conversation.id),
 		).toEqual([{ serverId: "server-1", enabled: false }]);

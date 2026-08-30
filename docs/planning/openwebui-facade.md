@@ -1,5 +1,17 @@
 # Open WebUI Compatibility Facade
 
+> **Status: removed.** The facade was deleted during the pi-engine rewrite
+> (see `pi-rpc-rewrite.md`) because its generation path depended on the
+> chat-v2 engine that no longer exists. This document is retained as the
+> faithful record of its behaviors and contract-level needs, should the
+> facade ever be rebuilt — on top of the pi engine next time, starting from
+> `PiGenerationRegistry.subscribe` (the successor of
+> `chat/generationManager.subscribeChunks`) and the public `/api/chat` routes.
+
+Everything below is historical design and prototype documentation. The listed
+Open WebUI routes, source files, tests, and client validation results do not
+describe the current repository.
+
 ## Objective
 
 Allow an unmodified Open WebUI client to use Solar as its persistent backend.
@@ -83,7 +95,7 @@ The facade should be implemented as a focused server module, initially under
 
 The exact file split can remain smaller until the contract is proven.
 
-## Current prototype
+## Historical prototype (removed)
 
 The server now exposes the initial facade at the shared Open WebUI paths:
 

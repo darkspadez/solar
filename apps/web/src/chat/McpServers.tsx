@@ -14,9 +14,7 @@ export function McpServers({ onClose }: { onClose: () => void }) {
 	const [headerName, setHeaderName] = useState("Authorization");
 	const [headerValue, setHeaderValue] = useState("");
 	const [global, setGlobal] = useState(false);
-	const [validationError, setValidationError] = useState<string | null>(
-		null,
-	);
+	const [validationError, setValidationError] = useState<string | null>(null);
 	// Some browser extensions (password managers, form fillers) can set an
 	// input's value directly on the DOM without firing the events React's
 	// controlled inputs rely on, desyncing displayed text from component

@@ -54,7 +54,18 @@ import {
 } from "../chat/pasteSettings";
 import { SourceCategoryResolver } from "../sources/categories";
 import { parseSkill } from "../chat/skills";
-import { chatV2Repository, loadMessages } from "../chat/v2Live";
+import { chatV2Repository } from "../chat-v2/db/repository";
+import { piCompact, piDeleteConversation } from "../pi/engine";
+import { importConversation, isPiSessionReady } from "../pi/migration";
+import { buildPiExportBundle } from "../pi/export";
+import { piModelCapabilities, syncPiModelConfig } from "../pi/models";
+import {
+	loadPiMessages,
+	piConversationMatchesQuery,
+	piConversationTitle,
+	piConversationUsage,
+	piLatestCompaction,
+} from "../pi/turns";
 import {
 	ChatV2ExportService,
 	type ChatV2ExportBundle,
@@ -63,10 +74,6 @@ import {
 	ChatV2ImportService,
 	ChatV2ImportValidationError,
 } from "../chat-v2/import";
-import { rebuildSearchProjection, searchProjection } from "../chat-v2/search";
-import { CompactionService } from "../chat-v2/compaction";
-import { findSafeCompactionRange } from "../chat-v2/context";
-import { createV2Summarizer } from "../chat-v2/summarizer";
 
 const t = initTRPC.context<TrpcContext>().create();
 
@@ -100,7 +107,9 @@ const conversationRouter = router({
 		const tagById = new Map(tags.map((tag) => [tag.id, tag]));
 		return conversations.map((conversation) => ({
 			id: conversation.id,
-			title: conversation.title,
+			title: isPiSessionReady(conversation.id)
+				? (piConversationTitle(conversation.id) ?? conversation.title)
+				: conversation.title,
 			folderId: conversation.folderId,
 			provider: conversation.provider,
 			endpointId: conversation.endpointId,
@@ -124,7 +133,15 @@ const conversationRouter = router({
 			}),
 		)
 		.mutation(async ({ ctx, input }) => {
-			await chatV2Repository.deleteAbandonedConversations(ctx.user.id);
+			const persistedConversationIds = (
+				await chatV2Repository.listConversations(ctx.user.id)
+			)
+				.filter((conversation) => isPiSessionReady(conversation.id))
+				.map((conversation) => conversation.id);
+			await chatV2Repository.deleteAbandonedConversations(
+				ctx.user.id,
+				persistedConversationIds,
+			);
 			const presetId =
 				input.presetId ?? (await getUserDefaultPreset(ctx.user.id));
 			// Snapshot the preset (model + system prompt + reasoning params) onto the
@@ -213,6 +230,9 @@ const conversationRouter = router({
 		.input(z.object({ id: z.string() }))
 		.mutation(async ({ ctx, input }) => {
 			try {
+				if (isPiSessionReady(input.id)) {
+					await piDeleteConversation(input.id);
+				}
 				await chatV2Repository.deleteConversation(ctx.user.id, input.id);
 			} catch {
 				throw new TRPCError({ code: "NOT_FOUND" });
@@ -230,49 +250,24 @@ const conversationRouter = router({
 			} catch {
 				throw new TRPCError({ code: "NOT_FOUND" });
 			}
-			const compactions = await chatV2Repository.listCompactions(
-				ctx.user.id,
-				input.conversationId,
-			);
-			const jobs = await chatV2Repository.listCompactionJobs(
-				ctx.user.id,
-				input.conversationId,
-			);
-			const failedJob = jobs.find((job) => job.status === "failed");
-			const activeJob = jobs.find(
-				(job) => job.status === "queued" || job.status === "running",
-			);
-			const latest = compactions.at(-1);
-			let retainedMessageBoundaryId: string | null = null;
-			if (latest) {
-				const canonicalMessages =
-					await chatV2Repository.listCanonicalMessages(
-						ctx.user.id,
-						input.conversationId,
-					);
-				const lastIdx = canonicalMessages.findIndex(
-					(m) => m.id === latest.lastMessageId,
-				);
-				if (lastIdx >= 0) {
-					const lastCompactedTurnId = canonicalMessages[lastIdx]!.turnId;
-					const retainedMsg = canonicalMessages
-						.slice(lastIdx + 1)
-						.find((m) => m.turnId !== lastCompactedTurnId);
-					retainedMessageBoundaryId = retainedMsg ? retainedMsg.turnId : null;
-				}
-			}
+			// Pi compacts inside its own process; there is no Solar job queue to
+			// report from. We expose the latest compaction the session file knows
+			// about, always in the idle state.
+			const latest = isPiSessionReady(input.conversationId)
+				? piLatestCompaction(input.conversationId)
+				: null;
 			return {
-				state: failedJob ? "failed" : activeJob ? "running" : "idle",
+				state: "idle" as const,
 				estimatedTokens: latest?.tokensBefore ?? null,
-				summarized: compactions.length > 0,
-				jobError: failedJob?.errorMessage ?? null,
+				summarized: latest !== null,
+				jobError: null,
 				summaryEvent: latest
 					? {
 							tokensBefore: latest.tokensBefore,
-							tokensAfter: latest.tokensAfter,
-							revision: compactions.length,
+							tokensAfter: latest.usageOutput ?? null,
+							revision: latest.revision,
 							createdAt: latest.createdAt,
-							retainedMessageBoundaryId,
+							retainedMessageBoundaryId: null,
 						}
 					: null,
 			};
@@ -306,134 +301,49 @@ const conversationRouter = router({
 					? undefined
 					: await resolveModel(selection);
 			const contextWindowTokens = resolved?.model.contextWindow ?? 128_000;
-			const [latest, totals] = await Promise.all([
-				db
-					.selectFrom("provider_call_telemetry")
-					.select(["inputTokens", "cacheReadTokens", "outputTokens"])
-					.where("conversationId", "=", input.conversationId)
-					.where("purpose", "in", ["chat", "tool_loop"])
-					.orderBy("createdAt", "desc")
-					.executeTakeFirst(),
-				db
-					.selectFrom("provider_call_telemetry")
-					.select(
-						sql<number>`coalesce(sum(estimatedCostMicros), 0)`.as("costMicros"),
-					)
-					.where("conversationId", "=", input.conversationId)
-					.executeTakeFirstOrThrow(),
-			]);
-
-			let contextTokens: number | null = null;
-			if (latest?.inputTokens != null) {
-				contextTokens = latest.inputTokens + (latest.cacheReadTokens ?? 0);
-			} else {
-				const latestGen = await db
-					.selectFrom("v2_generation")
-					.select(["usageJson"])
-					.where("conversationId", "=", input.conversationId)
-					.where("status", "=", "complete")
-					.orderBy("createdAt", "desc")
-					.executeTakeFirst();
-				if (latestGen?.usageJson) {
-					try {
-						const usage = JSON.parse(latestGen.usageJson) as {
-							input?: number;
-							output?: number;
-							cacheRead?: number;
-						};
-						if (typeof usage.input === "number") {
-							contextTokens = usage.input + (usage.cacheRead ?? 0);
-						}
-					} catch {}
-				}
-			}
-
+			// Usage comes from the session file's own usage blocks (plan: Usage &
+			// cost accounting); provider_call_telemetry is retired with chat-v2.
+			const usage = piConversationUsage(input.conversationId);
 			return {
-				contextTokens,
+				contextTokens: usage.lastConversationTokens,
 				contextWindowTokens,
-				compactionAtTokens:
-					resolved?.contextPolicy?.softTriggerTokens ??
-					Math.round(contextWindowTokens * 0.75),
-				costMicros: totals.costMicros,
+				compactionAtTokens: Math.round(contextWindowTokens * 0.75),
+				costMicros: usage.costMicros,
 			};
 		}),
 
 	compact: protectedProcedure
 		.input(z.object({ conversationId: z.string() }))
 		.mutation(async ({ ctx, input }) => {
-			const conversation = await (async () => {
-				try {
-					return await chatV2Repository.getConversation(
-						ctx.user.id,
-						input.conversationId,
-					);
-				} catch {
-					throw new TRPCError({ code: "NOT_FOUND" });
+			try {
+				await chatV2Repository.getConversation(
+					ctx.user.id,
+					input.conversationId,
+				);
+			} catch {
+				throw new TRPCError({ code: "NOT_FOUND" });
+			}
+			// pi compacts in its own process (auto or on demand); the session file
+			// is the only recording of it. A conversation that has migrated needs
+			// the pi session file; if we get here with only archived chat-v2 rows,
+			// migrate first so manual compaction always targets the live engine.
+			if (!isPiSessionReady(input.conversationId)) {
+				const migrated = await importConversation(
+					ctx.user.id,
+					input.conversationId,
+				).catch(() => null);
+				if (!migrated) {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message: "Conversation cannot be compacted (migration failed)",
+					});
 				}
-			})();
-			const selection = await resolveSelection(
-				{
-					provider: conversation.provider ?? undefined,
-					endpointId: conversation.endpointId ?? undefined,
-					modelId: conversation.modelId ?? undefined,
-					api: conversation.modelApi ?? undefined,
-				},
-				ctx.user.id,
-				ctx.user.role === "admin",
-			);
-			const messages = await chatV2Repository.listCanonicalMessages(
-				ctx.user.id,
-				input.conversationId,
-			);
-			const compactions = await chatV2Repository.listCompactions(
-				ctx.user.id,
-				input.conversationId,
-			);
-			const compactedThrough = compactions.reduce(
-				(last, compaction) =>
-					Math.max(
-						last,
-						messages.findIndex(
-							(message) => message.id === compaction.lastMessageId,
-						),
-					),
-				-1,
-			);
-			const first = compactedThrough + 1;
-			const candidateLast = messages.length - 3;
-			const safeRange = findSafeCompactionRange(
-				messages,
-				first,
-				candidateLast,
-			);
-			if (
-				!safeRange ||
-				safeRange.lastIndex - safeRange.firstIndex < 1
-			) {
-				throw new TRPCError({
-					code: "BAD_REQUEST",
-					message: "No compactable history available",
-				});
 			}
-			const job = await new CompactionService(chatV2Repository).enqueue(
-				ctx.user.id,
-				input.conversationId,
-				{
-					firstMessageId: messages[safeRange.firstIndex]!.id,
-					lastMessageId: messages[safeRange.lastIndex]!.id,
-				},
-			);
-			const result = await new CompactionService(chatV2Repository).run(
-				ctx.user.id,
-				job.id,
-				createV2Summarizer(selection),
-			);
-			if (result === "stale") {
-				throw new TRPCError({
-					code: "BAD_REQUEST",
-					message: "Conversation changed during compaction; try again",
-				});
-			}
+			await piCompact({
+				userId: ctx.user.id,
+				isAdmin: ctx.user.role === "admin",
+				conversationId: input.conversationId,
+			});
 			return { success: true };
 		}),
 
@@ -503,7 +413,7 @@ const conversationRouter = router({
 				ctx.user.id,
 				ctx.user.role === "admin",
 			);
-			const capabilities = await getModelCapabilities(selection);
+			const capabilities = await effectiveModelCapabilities(selection);
 			if (
 				input.reasoningEffort !== undefined &&
 				input.reasoningEffort !== null &&
@@ -568,28 +478,52 @@ const conversationRouter = router({
 			const conversations = await chatV2Repository.listConversations(
 				ctx.user.id,
 			);
-			const entries = (
-				await Promise.all(
-					conversations.map((conversation) =>
-						chatV2Repository.listCanonicalMessages(
-							ctx.user.id,
-							conversation.id,
-						),
-					),
-				)
-			).flatMap(rebuildSearchProjection);
-			const conversationIds = new Set(
-				searchProjection(entries, input.query).map(
-					(entry) => entry.conversationId,
-				),
+			const needle = input.query.toLocaleLowerCase();
+			const matchedIds = new Set<string>();
+			// 1. Migrated conversations: scan the pi session files directly.
+			for (const conversation of conversations) {
+				if (
+					isPiSessionReady(conversation.id) &&
+					piConversationMatchesQuery(conversation.id, input.query)
+				) {
+					matchedIds.add(conversation.id);
+				}
+			}
+			// 2. Still-unmigrated conversations (archived chat-v2 data): plain
+			//    ILIKE over the frozen canonical table.
+			const unmigrated = conversations.filter(
+				(conversation) => !isPiSessionReady(conversation.id),
 			);
+			for (const conversation of unmigrated) {
+				if (matchedIds.has(conversation.id)) continue;
+				const rows = await chatV2Repository.listCanonicalMessages(
+					ctx.user.id,
+					conversation.id,
+				);
+				for (const record of rows) {
+					const text =
+						typeof record.message.content === "string"
+							? record.message.content
+							: (
+									record.message.content as Array<{
+										type?: string;
+										text?: string;
+									}>
+								)
+									.filter((part) => part.type === "text")
+									.map((part) => part.text ?? "")
+									.join("\n");
+					if (text.toLocaleLowerCase().includes(needle)) {
+						matchedIds.add(conversation.id);
+						break;
+					}
+				}
+			}
 			return conversations
 				.filter(
 					(conversation) =>
-						conversation.title
-							.toLocaleLowerCase()
-							.includes(input.query.toLocaleLowerCase()) ||
-						conversationIds.has(conversation.id),
+						matchedIds.has(conversation.id) ||
+						conversation.title.toLocaleLowerCase().includes(needle),
 				)
 				.map(({ id, title, updatedAt }) => ({ id, title, updatedAt }));
 		}),
@@ -605,7 +539,12 @@ const conversationRouter = router({
 			} catch {
 				throw new TRPCError({ code: "NOT_FOUND" });
 			}
-			return loadMessages(ctx.user.id, input.conversationId);
+			// Lazily migrate archived chat-v2 conversations on first open so the
+			// transcript is always served from the pi session file.
+			if (!isPiSessionReady(input.conversationId)) {
+				await importConversation(ctx.user.id, input.conversationId);
+			}
+			return loadPiMessages(ctx.user.id, input.conversationId);
 		}),
 
 	getDisplayMode: protectedProcedure
@@ -946,8 +885,13 @@ const adminRouter = router({
 			)
 			.query(async ({ input }) => {
 				const service = new ChatV2ExportService(db, chatV2Repository);
-				if (input.conversationId)
-					return service.build(input.userId, input.conversationId);
+				// Migrated conversations export from the pi session file; archived
+				// chat-v2 conversations from their frozen canonical rows.
+				const buildOne = (conversationId: string) =>
+					isPiSessionReady(conversationId)
+						? buildPiExportBundle(input.userId, conversationId)
+						: service.build(input.userId, conversationId);
+				if (input.conversationId) return buildOne(input.conversationId);
 				const conversations = await chatV2Repository.listConversations(
 					input.userId,
 				);
@@ -956,9 +900,7 @@ const adminRouter = router({
 					exportedAt: new Date().toISOString(),
 					userId: input.userId,
 					conversations: await Promise.all(
-						conversations.map((conversation) =>
-							service.build(input.userId, conversation.id),
-						),
+						conversations.map((conversation) => buildOne(conversation.id)),
 					),
 				};
 			}),
@@ -1020,7 +962,7 @@ const adminRouter = router({
 				enabledModels: await Promise.all(
 					config.enabledModels.map(async (model) => ({
 						...model,
-						capabilities: await getModelCapabilities({
+						capabilities: await effectiveModelCapabilities({
 							provider: config.provider,
 							endpointId: model.endpointId,
 							modelId: model.id,
@@ -1105,6 +1047,8 @@ const adminRouter = router({
 					}),
 				)
 				.execute();
+			// pi regenerates models.json/auth.json from provider_config.
+			await syncPiModelConfig(config.port);
 		}),
 
 	deleteProvider: adminProcedure
@@ -1114,6 +1058,7 @@ const adminRouter = router({
 				.deleteFrom("provider_config")
 				.where("provider", "=", input.provider)
 				.execute();
+			await syncPiModelConfig(config.port);
 		}),
 
 	queryProviderModels: adminProcedure
@@ -1393,21 +1338,22 @@ const adminRouter = router({
 			sqlite.query("DELETE FROM user WHERE id = ?").run(input.userId);
 		}),
 
-	usage: adminProcedure.query(
-		() =>
-			sqlite
-				.query(`
-      SELECT u.id AS userId, u.name, u.email, COALESCE(m.model, 'unknown') AS model,
-        COUNT(*) AS messageCount, COALESCE(SUM(m.inputTokens), 0) AS inputTokens,
-        COALESCE(SUM(m.outputTokens), 0) AS outputTokens
-      FROM message m
-      JOIN conversation c ON c.id = m.conversationId
-      JOIN user u ON u.id = c.userId
-      WHERE m.role = 'assistant'
-      GROUP BY u.id, u.name, u.email, m.model
-      ORDER BY u.email ASC, model ASC
-    `)
-				.all() as {
+	// Usage is derived from pi session files (plan: Usage & cost accounting);
+	// archived chat-v2 conversations have no pi file and are skipped until
+	// touched (per-conversation lazy migration).
+	usage: adminProcedure.query(async () => {
+		// Better Auth's user table lives outside the typed app schema.
+		const userRows = sqlite
+			.query("SELECT id AS userId, name, email FROM user ORDER BY email ASC")
+			.all() as Array<{ userId: string; name: string; email: string }>;
+		const usersById = new Map(userRows.map((row) => [row.userId, row]));
+		const conversations = await db
+			.selectFrom("v2_conversation")
+			.select(["id", "userId", "provider", "modelId"])
+			.execute();
+		const buckets = new Map<
+			string,
+			{
 				userId: string;
 				name: string;
 				email: string;
@@ -1415,9 +1361,65 @@ const adminRouter = router({
 				messageCount: number;
 				inputTokens: number;
 				outputTokens: number;
-			}[],
-	),
+			}
+		>();
+		for (const row of conversations) {
+			if (!isPiSessionReady(row.id)) continue;
+			const usage = piConversationUsage(row.id);
+			if (!usage.assistantMessageCount) continue;
+			const user = usersById.get(row.userId);
+			if (!user) continue;
+			const model = `${row.provider ?? "unknown"}/${row.modelId ?? "unknown"}`;
+			const key = `${row.userId}:${model}`;
+			const bucket = buckets.get(key) ?? {
+				userId: row.userId,
+				name: user.name,
+				email: user.email,
+				model,
+				messageCount: 0,
+				inputTokens: 0,
+				outputTokens: 0,
+			};
+			bucket.inputTokens += usage.inputTokens;
+			bucket.outputTokens += usage.outputTokens;
+			bucket.messageCount += usage.assistantMessageCount;
+			buckets.set(key, bucket);
+		}
+		return [...buckets.values()].sort(
+			(a, b) =>
+				a.email.localeCompare(b.email) || a.model.localeCompare(b.model),
+		);
+	}),
 });
+
+/** Model capabilities for request time: pi's models.json (0.84 data) is
+ * authoritative when the model is provisioned; falls back to the legacy
+ * derivation only for provisioning-time lookups against not-yet-enabled
+ * models (admin catalog browsing). */
+async function effectiveModelCapabilities(selection: {
+	provider: string;
+	endpointId: string;
+	modelId: string;
+	api: string;
+}) {
+	const entry = (await loadProviderConfigs())
+		.find((config) => config.provider === selection.provider)
+		?.enabledModels.find(
+			(candidate) =>
+				candidate.id === selection.modelId &&
+				candidate.endpointId === selection.endpointId &&
+				candidate.api === selection.api,
+		);
+	const piCaps = piModelCapabilities(selection);
+	if (!piCaps) return getModelCapabilities(selection);
+	return {
+		reasoningLevels: piCaps.reasoningLevels,
+		supportsVerbosity: piCaps.supportsVerbosity,
+		defaultReasoningEffort: entry?.reasoningEffort ?? null,
+		defaultVerbosity: entry?.verbosity ?? null,
+		contextWindow: piCaps.contextWindow ?? 128_000,
+	};
+}
 
 const modelSelectionSchema = z.object({
 	provider: z.string(),
@@ -1491,7 +1493,7 @@ const modelRouter = router({
 					m.modelId === selection.modelId &&
 					m.api === selection.api,
 			);
-			const capabilities = await getModelCapabilities(selection);
+			const capabilities = await effectiveModelCapabilities(selection);
 			const documentMimeTypes = await documentInputMimeTypes(selection);
 			console.info("[attachments] model capability", {
 				conversationId: input.conversationId,

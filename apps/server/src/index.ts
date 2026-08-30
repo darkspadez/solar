@@ -1,26 +1,29 @@
 import { trpcServer } from "@hono/trpc-server";
-import { Server as SocketEngine } from "@socket.io/bun-engine";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import * as path from "node:path";
-import { Server as SocketIoServer } from "socket.io";
 import { getLogLevel, logger } from "./logger";
 import { config } from "./config";
 import { auth } from "./auth";
+import type {} from "./db";
 import { db, sqlite } from "./db";
 import { migrateAuth } from "./db/migrate-auth";
 import { migrateToLatest } from "./db/migrate";
 import { seedDevUser } from "./db/seed-dev";
 import { attachmentRoutes } from "./chat/attachmentRoutes";
+import { MAX_ATTACHMENT_BYTES } from "./chat/attachments";
 import { chatRoutes } from "./chat/routes";
-import { chatV2Repository } from "./chat/v2Live";
+import { piBridgeRoutes } from "./pi/bridge/server";
+import { piSessionManager } from "./pi/manager";
+import { syncPiModelConfig } from "./pi/models";
 import { createContext } from "./trpc/context";
 import { appRouter } from "./trpc/router";
-import { createOpenWebUiRoutes } from "./openwebui/routes";
-import { OpenWebUiSocketGateway } from "./openwebui/socket";
 import { traceJsonBody } from "./requestTracing";
 
 const isProduction = process.env.NODE_ENV === "production";
+const MAX_MULTIPART_OVERHEAD_BYTES = 1024 * 1024;
+const MAX_ATTACHMENT_REQUEST_BYTES =
+	MAX_ATTACHMENT_BYTES + MAX_MULTIPART_OVERHEAD_BYTES;
 // Production serves the bundled web assets.
 const index = isProduction
 	? undefined
@@ -122,16 +125,9 @@ await db
 	.onConflict((oc) => oc.column("key").doUpdateSet({ value: "1" }))
 	.execute();
 await seedDevUser();
-await chatV2Repository.reconcileRunningGenerations();
+await syncPiModelConfig(config.port);
 
 const app = new Hono();
-const openWebUiGateway = new OpenWebUiSocketGateway();
-const socketIo = new SocketIoServer();
-const socketEngine = new SocketEngine({ path: "/ws/socket.io/" });
-socketIo.bind(socketEngine);
-openWebUiGateway.bind(socketIo);
-const socketEngineHandler = socketEngine.handler();
-const openWebUiRoutes = createOpenWebUiRoutes(openWebUiGateway);
 
 app.use("*", async (c, next) => {
 	const requestId = c.req.header("x-request-id") ?? crypto.randomUUID();
@@ -214,10 +210,8 @@ app.all("/api/auth/api-key/*", (c) => c.notFound());
 app.all("/api/auth/sign-up/email", (c) => c.notFound());
 app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
 
-// Decoupled chat streaming (SSE) — see chat/generationManager.ts.
 app.route("/api/chat", chatRoutes);
 app.route("/api/attachments", attachmentRoutes);
-app.route("/", openWebUiRoutes);
 
 app.use(
 	"/trpc/*",
@@ -227,6 +221,22 @@ app.use(
 		createContext: (opts, c) => createContext(opts, c),
 	}),
 );
+
+/**
+ * /internal/* — loopback-only surface used by spawned pi child processes
+ * (tool/attachment bridge, mock LLM). The bearer token is also checked per
+ * route; this IP gate is defense in depth for a mis-issued token never
+ * leaving the box.
+ */
+function dispatchInternalRequest(
+	request: Request,
+	server: { requestIP: (req: Request) => { address: string } | null },
+): Promise<Response> | Response {
+	const remote = server.requestIP(request)?.address ?? "";
+	const loopback = ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(remote);
+	if (!loopback) return new Response("Forbidden", { status: 403 });
+	return piBridgeRoutes.fetch(request);
+}
 
 async function dispatchAppRequest(request: Request): Promise<Response> {
 	const url = new URL(request.url);
@@ -252,12 +262,8 @@ async function dispatchAppRequest(request: Request): Promise<Response> {
 // the "/*" HTML catch-all and delegate to Hono.
 const server = Bun.serve({
 	port: config.port,
-	idleTimeout: socketEngineHandler.idleTimeout,
-	maxRequestBodySize: socketEngineHandler.maxRequestBodySize,
-	websocket: socketEngineHandler.websocket,
+	maxRequestBodySize: MAX_ATTACHMENT_REQUEST_BYTES,
 	routes: {
-		"/ws/socket.io/*": (req, server) => socketEngine.handleRequest(req, server),
-		"/ws/socket.io": (req, server) => socketEngine.handleRequest(req, server),
 		"/trpc/*": dispatchAppRequest,
 		"/api/auth/*": dispatchAppRequest,
 		"/api/chat/*": dispatchAppRequest,
@@ -265,6 +271,7 @@ const server = Bun.serve({
 		"/api/attachments/*": dispatchAppRequest,
 		"/api/attachments": dispatchAppRequest,
 		"/api/*": dispatchAppRequest,
+		"/internal/*": dispatchInternalRequest,
 		"/health": dispatchAppRequest,
 		"/healthz": dispatchAppRequest,
 		"/manifest.webmanifest": isProduction
@@ -294,9 +301,7 @@ logger
 // in-flight requests). Stop accepting connections, drain, close the DB, exit.
 const shutdown = async (signal: string) => {
 	logger.withMetadata({ signal }).info("solar server shutting down");
-	openWebUiGateway.close();
-	socketIo.close();
-	socketEngine.close();
+	await piSessionManager.shutdown();
 	await server.stop();
 	sqlite.close();
 	process.exit(0);

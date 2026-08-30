@@ -95,12 +95,18 @@ export async function describeToolNames(
 	const result = new Map<string, { serverName: string; remoteName: string }>();
 	const mcpNames = names.filter((name) => name.startsWith("mcp_"));
 	if (!mcpNames.length) return result;
-	const servers = await db.selectFrom("mcp_server").select(["id", "name"]).execute();
+	const servers = await db
+		.selectFrom("mcp_server")
+		.select(["id", "name"])
+		.execute();
 	for (const name of mcpNames) {
 		for (const server of servers) {
 			const prefix = toolName(server.id, "");
 			if (name.startsWith(prefix)) {
-				result.set(name, { serverName: server.name, remoteName: name.slice(prefix.length) });
+				result.set(name, {
+					serverName: server.name,
+					remoteName: name.slice(prefix.length),
+				});
 				break;
 			}
 		}

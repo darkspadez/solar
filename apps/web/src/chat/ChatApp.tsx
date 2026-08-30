@@ -17,6 +17,7 @@ import {
 import { signOut, useSession } from "../auth";
 import { useTRPC } from "../trpc";
 import { ThemeToggle } from "../ThemeToggle";
+import { copyText } from "../clipboard";
 import { Settings } from "../admin/Settings";
 import { ModelMenu } from "./ModelPicker";
 import { Presets } from "./Presets";
@@ -160,11 +161,12 @@ function ConversationInfoMenu({ conversationId }: { conversationId: string }) {
 	);
 
 	const defaultMode = displayModeQuery.data?.defaultDisplayMode ?? "compact";
-	const isCompacting =
-		contextQuery.data?.state === "running" || compactMutation.isPending;
+	// pi compacts synchronously inside its process; there is no visible
+	// server-side job state anymore.
+	const isCompacting = compactMutation.isPending;
 
 	async function copyChatId() {
-		await navigator.clipboard.writeText(conversationId);
+		await copyText(conversationId);
 		setCopied(true);
 	}
 

@@ -5,6 +5,7 @@ import { db } from "../db";
 import type { AttachmentKind } from "../db/schema";
 import type { DocumentInputCapabilities } from "./nativeAttachmentAdapters";
 import { extractDocumentText, pdfMetadata } from "./documentTextExtraction";
+import { logger } from "../logger";
 
 /**
  * Attachment storage (M3): images + plain-text, plus request-scoped extraction
@@ -13,7 +14,7 @@ import { extractDocumentText, pdfMetadata } from "./documentTextExtraction";
  * changes.
  */
 
-const MAX_BYTES = 20 * 1024 * 1024;
+export const MAX_ATTACHMENT_BYTES = 16 * 1024 * 1024;
 const TEXT_MIME_TYPES = new Set([
 	"application/json",
 	"application/ld+json",
@@ -86,8 +87,8 @@ export async function saveAttachmentFile(params: {
 	if (kind === "document" && params.bytes.byteLength === 0) {
 		throw new AttachmentError("Document is empty");
 	}
-	if (params.bytes.byteLength > MAX_BYTES) {
-		throw new AttachmentError("File exceeds the 20 MB limit");
+	if (params.bytes.byteLength > MAX_ATTACHMENT_BYTES) {
+		throw new AttachmentError("File exceeds the 16 MB limit");
 	}
 	const imageDimensions =
 		kind === "image"
@@ -197,38 +198,53 @@ export async function expandAttachmentRows(
 	const documents: NativeDocumentInput[] = [];
 	for (const r of rows) {
 		if (allowedAttachmentIds && !allowedAttachmentIds.has(r.id)) continue;
-		const bytes = await disk.readFile(path(r.storageKey));
-		if (r.kind === "document" && bytes.byteLength === 0) {
-			throw new AttachmentError(
-				`Attachment ${r.filename} is empty; upload it again`,
-			);
-		}
-		if (r.kind === "image") {
-			parts.push({
-				type: "image",
-				data: Buffer.from(bytes).toString("base64"),
-				mimeType: r.mimeType,
-			});
-		} else if (r.kind === "text") {
-			const text = Buffer.from(bytes).toString("utf-8");
+		// Fault isolation: one unreadable/corrupt attachment must never sink
+		// the whole batch (its old behavior took the whole prompt down with a
+		// 500 from the bridge endpoint, silently dropping everything else).
+		try {
+			const bytes = await disk.readFile(path(r.storageKey));
+			if (r.kind === "document" && bytes.byteLength === 0) {
+				throw new AttachmentError(
+					`Attachment ${r.filename} is empty; upload it again`,
+				);
+			}
+			if (r.kind === "image") {
+				parts.push({
+					type: "image",
+					data: Buffer.from(bytes).toString("base64"),
+					mimeType: r.mimeType,
+				});
+			} else if (r.kind === "text") {
+				const text = Buffer.from(bytes).toString("utf-8");
+				parts.push({
+					type: "text",
+					text: `<attachment name="${r.filename}">\n${text}\n</attachment>`,
+				});
+			} else if (documentInput.nativeMimeTypes.includes(r.mimeType)) {
+				const marker = `[[solar-document:${r.id}]]`;
+				parts.push({ type: "text", text: marker });
+				documents.push({
+					marker,
+					data: Buffer.from(bytes).toString("base64"),
+					mimeType: r.mimeType,
+					filename: r.filename,
+				});
+			} else if (documentInput.extractedTextMimeTypes.includes(r.mimeType)) {
+				const text = await extractDocumentText(bytes, r.mimeType);
+				parts.push({
+					type: "text",
+					text: `<attachment name="${r.filename}">\n${text}\n</attachment>`,
+				});
+			}
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			logger
+				.withError(error)
+				.withMetadata({ attachmentId: r.id, filename: r.filename })
+				.warn("attachment expansion failed; substituting placeholder");
 			parts.push({
 				type: "text",
-				text: `<attachment name="${r.filename}">\n${text}\n</attachment>`,
-			});
-		} else if (documentInput.nativeMimeTypes.includes(r.mimeType)) {
-			const marker = `[[solar-document:${r.id}]]`;
-			parts.push({ type: "text", text: marker });
-			documents.push({
-				marker,
-				data: Buffer.from(bytes).toString("base64"),
-				mimeType: r.mimeType,
-				filename: r.filename,
-			});
-		} else if (documentInput.extractedTextMimeTypes.includes(r.mimeType)) {
-			const text = await extractDocumentText(bytes, r.mimeType);
-			parts.push({
-				type: "text",
-				text: `<attachment name="${r.filename}">\n${text}\n</attachment>`,
+				text: `<attachment name="${r.filename}">\n[Attachment could not be read: ${reason}]\n</attachment>`,
 			});
 		}
 	}

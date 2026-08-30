@@ -1,7 +1,9 @@
-# Chat V2 Frozen Contract
+# Legacy Chat V2 Frozen Contract
 
-Migration work targets pi-ai and pi-agent-core `0.80.10` exactly. The message
-validation contract is `validation.ts`: `parseCanonicalMessage`,
+This is the frozen SQLite archive contract used when importing legacy chat-v2
+history into pi. The live engine is `apps/server/src/pi/`; pi session JSONL is
+the canonical conversation store. The legacy message validation contract is
+`validation.ts`: `parseCanonicalMessage`,
 `validateMessageSequence`, `validateToolPairing`, and `zeroUsage`.
 
 The frozen schema contract is migrations `020_chat_v2.ts`,

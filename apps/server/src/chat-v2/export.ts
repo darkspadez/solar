@@ -83,39 +83,154 @@ export class ChatV2ExportService {
 		conversationId: string,
 		options: { includeCompactions?: boolean } = {},
 	): Promise<ChatV2ExportBundle> {
-		const conversation = await this.repository.getConversation(userId, conversationId);
-		const [messages, turns, attachmentRows, generations, generationEvents, voiceRows] =
-			await Promise.all([
-				this.repository.listCanonicalMessages(userId, conversationId),
-				this.db.selectFrom("v2_conversation_turn").selectAll().where("conversationId", "=", conversationId).orderBy("ordinal").execute(),
-				this.db.selectFrom("v2_message_attachment as binding").innerJoin("v2_conversation_message as message", "message.id", "binding.messageId").innerJoin("v2_attachment as attachment", "attachment.id", "binding.attachmentId").select(["binding.messageId", "binding.attachmentId", "binding.ordinal", "attachment.id", "attachment.userId", "attachment.storageKey", "attachment.filename", "attachment.mimeType", "attachment.kind", "attachment.byteSize", "attachment.sha256", "attachment.width", "attachment.height", "attachment.pageCount", "attachment.createdAt"]).where("message.conversationId", "=", conversationId).orderBy("binding.messageId").orderBy("binding.ordinal").execute(),
-				this.db.selectFrom("v2_generation").selectAll().where("conversationId", "=", conversationId).orderBy("createdAt").execute(),
-				this.db.selectFrom("v2_generation_event as event").innerJoin("v2_generation as generation", "generation.id", "event.generationId").selectAll("event").where("generation.conversationId", "=", conversationId).orderBy("event.generationId").orderBy("event.sequence").execute(),
-				this.db.selectFrom("v2_voice_turn").selectAll().where("conversationId", "=", conversationId).orderBy("createdAt").execute(),
-			]);
+		const conversation = await this.repository.getConversation(
+			userId,
+			conversationId,
+		);
+		const [
+			messages,
+			turns,
+			attachmentRows,
+			generations,
+			generationEvents,
+			voiceRows,
+		] = await Promise.all([
+			this.repository.listCanonicalMessages(userId, conversationId),
+			this.db
+				.selectFrom("v2_conversation_turn")
+				.selectAll()
+				.where("conversationId", "=", conversationId)
+				.orderBy("ordinal")
+				.execute(),
+			this.db
+				.selectFrom("v2_message_attachment as binding")
+				.innerJoin(
+					"v2_conversation_message as message",
+					"message.id",
+					"binding.messageId",
+				)
+				.innerJoin(
+					"v2_attachment as attachment",
+					"attachment.id",
+					"binding.attachmentId",
+				)
+				.select([
+					"binding.messageId",
+					"binding.attachmentId",
+					"binding.ordinal",
+					"attachment.id",
+					"attachment.userId",
+					"attachment.storageKey",
+					"attachment.filename",
+					"attachment.mimeType",
+					"attachment.kind",
+					"attachment.byteSize",
+					"attachment.sha256",
+					"attachment.width",
+					"attachment.height",
+					"attachment.pageCount",
+					"attachment.createdAt",
+				])
+				.where("message.conversationId", "=", conversationId)
+				.orderBy("binding.messageId")
+				.orderBy("binding.ordinal")
+				.execute(),
+			this.db
+				.selectFrom("v2_generation")
+				.selectAll()
+				.where("conversationId", "=", conversationId)
+				.orderBy("createdAt")
+				.execute(),
+			this.db
+				.selectFrom("v2_generation_event as event")
+				.innerJoin(
+					"v2_generation as generation",
+					"generation.id",
+					"event.generationId",
+				)
+				.selectAll("event")
+				.where("generation.conversationId", "=", conversationId)
+				.orderBy("event.generationId")
+				.orderBy("event.sequence")
+				.execute(),
+			this.db
+				.selectFrom("v2_voice_turn")
+				.selectAll()
+				.where("conversationId", "=", conversationId)
+				.orderBy("createdAt")
+				.execute(),
+		]);
 		const attachmentById = new Map<string, AttachmentRecord>();
 		for (const row of attachmentRows) {
-			const { messageId: _messageId, attachmentId: _attachmentId, ordinal: _ordinal, ...attachment } = row;
+			const {
+				messageId: _messageId,
+				attachmentId: _attachmentId,
+				ordinal: _ordinal,
+				...attachment
+			} = row;
 			attachmentById.set(attachment.id, attachment);
 		}
 		const folder = conversation.folderId
-			? await this.db.selectFrom("v2_folder").select(["id", "name", "createdAt"]).where("id", "=", conversation.folderId).where("userId", "=", userId).executeTakeFirst() ?? null
+			? ((await this.db
+					.selectFrom("v2_folder")
+					.select(["id", "name", "createdAt"])
+					.where("id", "=", conversation.folderId)
+					.where("userId", "=", userId)
+					.executeTakeFirst()) ?? null)
 			: null;
-		const tags = await this.db.selectFrom("v2_conversation_tag as binding").innerJoin("v2_tag as tag", "tag.id", "binding.tagId").select(["tag.id", "tag.name", "tag.createdAt"]).where("binding.conversationId", "=", conversationId).where("tag.userId", "=", userId).orderBy("tag.id").execute();
+		const tags = await this.db
+			.selectFrom("v2_conversation_tag as binding")
+			.innerJoin("v2_tag as tag", "tag.id", "binding.tagId")
+			.select(["tag.id", "tag.name", "tag.createdAt"])
+			.where("binding.conversationId", "=", conversationId)
+			.where("tag.userId", "=", userId)
+			.orderBy("tag.id")
+			.execute();
 		return {
 			version: CHAT_V2_EXPORT_VERSION,
 			sourceUserId: userId,
-			conversation: { ...conversation, generationConfig: JSON.parse(conversation.generationConfigJson) as Record<string, unknown> },
-			turns: turns.map((turn) => ({ ...turn, origin: turn.origin as CanonicalMessageOrigin, status: turn.status as CanonicalMessageStatus })),
+			conversation: {
+				...conversation,
+				generationConfig: JSON.parse(
+					conversation.generationConfigJson,
+				) as Record<string, unknown>,
+			},
+			turns: turns.map((turn) => ({
+				...turn,
+				origin: turn.origin as CanonicalMessageOrigin,
+				status: turn.status as CanonicalMessageStatus,
+			})),
 			messages,
 			attachments: [...attachmentById.values()],
-			bindings: attachmentRows.map(({ messageId, attachmentId, ordinal }) => ({ messageId, attachmentId, ordinal })),
-			generations: generations.map((generation) => ({ ...generation, request: JSON.parse(generation.requestJson) as Record<string, unknown>, contextManifest: parseJson<ContextManifest>(generation.contextManifestJson), partialMessage: parseJson<Message>(generation.partialMessageJson), usage: parseJson<Usage>(generation.usageJson), stopReason: generation.stopReason as StopReason | null })),
-			generationEvents: generationEvents.map((event) => ({ ...event, payload: JSON.parse(event.payloadJson) as Record<string, unknown> })),
-			compactions: options.includeCompactions === false ? undefined : await this.repository.listCompactions(userId, conversationId),
+			bindings: attachmentRows.map(({ messageId, attachmentId, ordinal }) => ({
+				messageId,
+				attachmentId,
+				ordinal,
+			})),
+			generations: generations.map((generation) => ({
+				...generation,
+				request: JSON.parse(generation.requestJson) as Record<string, unknown>,
+				contextManifest: parseJson<ContextManifest>(
+					generation.contextManifestJson,
+				),
+				partialMessage: parseJson<Message>(generation.partialMessageJson),
+				usage: parseJson<Usage>(generation.usageJson),
+				stopReason: generation.stopReason as StopReason | null,
+			})),
+			generationEvents: generationEvents.map((event) => ({
+				...event,
+				payload: JSON.parse(event.payloadJson) as Record<string, unknown>,
+			})),
+			compactions:
+				options.includeCompactions === false
+					? undefined
+					: await this.repository.listCompactions(userId, conversationId),
 			folder,
 			tags,
-			voiceTurns: voiceRows.map(({ metadataJson, ...voice }) => ({ ...voice, metadata: JSON.parse(metadataJson) as VoiceMetadata })),
+			voiceTurns: voiceRows.map(({ metadataJson, ...voice }) => ({
+				...voice,
+				metadata: JSON.parse(metadataJson) as VoiceMetadata,
+			})),
 		};
 	}
 }

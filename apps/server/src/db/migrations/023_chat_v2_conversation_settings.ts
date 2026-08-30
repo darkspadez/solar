@@ -52,12 +52,18 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 
 export async function down(db: Kysely<unknown>): Promise<void> {
 	await db.schema.dropTable("v2_conversation_mcp_server").execute();
-	await db.schema.alterTable("v2_conversation").dropColumn("displayMode").execute();
+	await db.schema
+		.alterTable("v2_conversation")
+		.dropColumn("displayMode")
+		.execute();
 	await db.schema
 		.alterTable("v2_conversation")
 		.dropColumn("autoExecuteTools")
 		.execute();
-	await db.schema.alterTable("v2_conversation").dropColumn("verbosity").execute();
+	await db.schema
+		.alterTable("v2_conversation")
+		.dropColumn("verbosity")
+		.execute();
 	await db.schema
 		.alterTable("v2_conversation")
 		.dropColumn("reasoningEffort")

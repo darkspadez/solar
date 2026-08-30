@@ -38,16 +38,34 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 		.addColumn("tagId", "text", (col) =>
 			col.notNull().references("v2_tag.id").onDelete("cascade"),
 		)
-		.addPrimaryKeyConstraint("v2_conversation_tag_pk", ["conversationId", "tagId"])
+		.addPrimaryKeyConstraint("v2_conversation_tag_pk", [
+			"conversationId",
+			"tagId",
+		])
 		.execute();
-	await db.schema.createIndex("v2_folder_userId_idx").on("v2_folder").column("userId").execute();
-	await db.schema.createIndex("v2_tag_userId_idx").on("v2_tag").column("userId").execute();
-	await db.schema.createIndex("v2_conversation_folderId_idx").on("v2_conversation").column("folderId").execute();
+	await db.schema
+		.createIndex("v2_folder_userId_idx")
+		.on("v2_folder")
+		.column("userId")
+		.execute();
+	await db.schema
+		.createIndex("v2_tag_userId_idx")
+		.on("v2_tag")
+		.column("userId")
+		.execute();
+	await db.schema
+		.createIndex("v2_conversation_folderId_idx")
+		.on("v2_conversation")
+		.column("folderId")
+		.execute();
 }
 
 export async function down(db: Kysely<unknown>): Promise<void> {
 	await db.schema.dropTable("v2_conversation_tag").execute();
-	await db.schema.alterTable("v2_conversation").dropColumn("folderId").execute();
+	await db.schema
+		.alterTable("v2_conversation")
+		.dropColumn("folderId")
+		.execute();
 	await db.schema.dropTable("v2_tag").execute();
 	await db.schema.dropTable("v2_folder").execute();
 }

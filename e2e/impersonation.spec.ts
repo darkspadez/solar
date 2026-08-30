@@ -16,7 +16,9 @@ async function openSettings(page: Page) {
 }
 
 test.describe("Admin Impersonation E2E", () => {
-	test("admin can start and stop impersonating another user", async ({ page }) => {
+	test("admin can start and stop impersonating another user", async ({
+		page,
+	}) => {
 		await signIn(page);
 
 		// Open Admin Settings -> Users tab
@@ -55,7 +57,9 @@ test.describe("Admin Impersonation E2E", () => {
 		// Verify user menu shows impersonated user's details and NO "Admin settings" button
 		await page.locator(".avatar-placeholder").click();
 		await expect(
-			page.locator(".dropdown-content").getByText(testUserName, { exact: true }),
+			page
+				.locator(".dropdown-content")
+				.getByText(testUserName, { exact: true }),
 		).toBeVisible();
 		await expect(
 			page.getByRole("button", { name: "Admin settings" }),

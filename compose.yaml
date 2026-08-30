@@ -8,5 +8,6 @@ services:
     environment:
       DATABASE_PATH: /data/solar.db
       SOLAR_ATTACHMENTS_DIR: /data/attachments
+      SOLAR_PI_AGENT_DIR: /data/pi-agent
     volumes:
       - ./data:/data

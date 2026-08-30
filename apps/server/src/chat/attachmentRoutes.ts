@@ -7,7 +7,7 @@ import {
 	saveAttachmentFile,
 } from "./attachments";
 import { AttachmentService } from "../chat-v2/attachments";
-import { chatV2Repository } from "./v2Live";
+import { chatV2Repository } from "../chat-v2/db/repository";
 
 export const attachmentRoutes = new Hono();
 
