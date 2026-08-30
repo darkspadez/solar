@@ -5,7 +5,8 @@ Guidance for AI agents working in this repository.
 ## Sub-domain Context
 - `apps/server/AGENTS.md` — Server entrypoint, Kysely/Better Auth DB, chat generation & streaming.
 - `apps/web/AGENTS.md` — Frontend styling, assistant-ui, Bun HMR, web tests.
-- `docs/chat-history.md` — History CLI (`solar history`) & staging deploy.
+- `scripts/solar.ts` — History CLI (`solar history`) and development server CLI.
+- `scripts/deploy.ts` — Staging and production deployment workflow.
 
 ## Current Constraints (Exploratory Phase)
 Do **not** add unless explicitly requested:
@@ -16,6 +17,9 @@ Do **not** add unless explicitly requested:
 - **Monorepo**: Bun workspaces + TypeScript.
 - **Backend**: Hono on `Bun.serve`, tRPC, Kysely + SQLite (`solar.db`), Better Auth.
 - **Frontend**: React, assistant-ui, tRPC + TanStack Query, Tailwind CSS 4 + DaisyUI 5.
+- **Chat persistence**: `pi-coding-agent` owns canonical conversation JSONL under
+  `${SOLAR_PI_AGENT_DIR}/sessions/<conversationId>`; SQLite retains Solar-owned
+  metadata, configuration, and attachment records.
 - **Single Process**: Server serves API and React app with HMR (no separate web dev server or Vite).
 
 ## Dev Server & LLM Mocking
@@ -35,9 +39,16 @@ Do **not** add unless explicitly requested:
 | `bun run test:server` | Server unit tests (**MUST** use script; bare `bun test` skips `--isolate`) |
 | `bun run test:e2e` | Run Playwright E2E tests |
 | `bun run build` | Production web bundle → `apps/server/dist/web` |
+| `bun run package` | Build the publishable Bun package |
 | `bun run migrate` / `migrate:auth` | App (Kysely) / Better Auth DB migrations |
 | `bun run codegen` | Regenerate `src/db/types.generated.ts` from `solar.db` |
 | `bun run solar history …` | Investigate local or remote server instance |
+| `bun run scripts/import-chat-v2-to-pi.ts` | Import legacy chat-v2 history into pi sessions |
+| `bun run deploy:staging` | Build and deploy the staging target |
+| `bun run deploy:production` | Build and deploy the production target |
+
+Canonical conversation history is not contained in SQLite alone. Persist and
+back up `${SOLAR_PI_AGENT_DIR}` alongside the database and attachment directory.
 
 ## Verification & Tools
 - **Confirming functionality**: Stop when the baseline is verified. Use `agent-browser` for local browser verification.

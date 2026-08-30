@@ -4,7 +4,7 @@
 
 <p align="center">
   <strong>Self-hosted AI chat for teams who prefer a coherent tool over a feature maze.</strong><br>
-  One Bun process · SQLite · local attachments · resumable streaming
+  One Bun process · SQLite · pi JSONL sessions · local attachments · resumable streaming
 </p>
 
 <p align="center">
@@ -82,10 +82,10 @@ finished answer can cite the sources it used.
 
 ## What you get
 
-- **Pi-powered, model-flexible chat.** `pi-agent-core` drives the agent loop and
-  `pi-ai` provides a unified path across configured providers and model APIs.
-  Switch models per conversation without rebuilding the workspace around one
-  vendor.
+- **Pi-powered, model-flexible chat.** `pi-coding-agent` owns the agent loop and
+  session state, while `pi-ai` provides a unified path across configured
+  providers and model APIs. Switch models per conversation without rebuilding
+  the workspace around one vendor.
 - **First-class streamed parts.** Thinking, tool calls, Markdown, code, LaTeX,
   citations, and source lists arrive in the thread as they are produced.
 - **Remote MCP tools.** Connect Streamable HTTP MCP servers, discover tools,
@@ -99,10 +99,10 @@ finished answer can cite the sources it used.
   inputs. Plain text and supported Office/PDF documents are extracted or passed
   through according to model capability—no embeddings or vector database
   required.
-- **Persistent by default.** Conversations, native message parts, tool steps,
-  summaries, usage, and attachments live in one SQLite database plus a local
-  data directory. A dropped browser connection does not cancel generation;
-  reload can bring it back.
+- **Persistent by default.** Conversation ownership, settings, and attachments
+  live in SQLite and the local data directory. Canonical conversation messages
+  and pi session state live as JSONL under `SOLAR_PI_AGENT_DIR`. A dropped
+  browser connection does not cancel generation; reload can bring it back.
 - **Responsive and themed.** The sidebar becomes a drawer on narrow screens;
   themes persist automatically, with Solar Light and Solar Dark among the
   choices.
@@ -116,18 +116,21 @@ finished answer can cite the sources it used.
 browser
   │  typed tRPC + SSE UI Message Stream
   ▼
-one Bun process ── Hono / tRPC / generation manager
+one Bun process ── Hono / tRPC / pi RPC bridge
   │       │             │
-  │       │             └── pi-agent-core + pi-ai
+  │       │             └── pi --mode rpc child (live generation)
   │       └──────────────── models, reasoning, MCP tools
   ├── React + assistant-ui
-  ├── SQLite (auth, chats, native parts, context, usage)
+  ├── SQLite (auth, ownership, settings, attachments)
   └── Mirage local disk (images, text, documents)
+       │
+       └── pi JSONL sessions under SOLAR_PI_AGENT_DIR
 ```
 
-The generation task is decoupled from the HTTP request. It buffers deltas,
-persists the final native assistant message, and lets SSE subscribers reconnect
-with `Last-Event-ID`. Explicit **Stop** is the cancellation boundary.
+The generation task is decoupled from the HTTP request. The pi child persists
+the canonical session while the server bridge buffers deltas and lets SSE
+subscribers reconnect with `Last-Event-ID`. Explicit **Stop** is the
+cancellation boundary.
 
 ## Quick start
 
@@ -139,8 +142,8 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Open <http://localhost:3000>. Persistent database and attachment data live in
-`./data`.
+Open <http://localhost:3000>. The `./data` directory contains the persistent
+database, attachment data, and pi agent/session state.
 
 The first account registered on a fresh deployment becomes the admin. In local
 development, the seeded convenience account is `admin@solar.local` with
@@ -150,7 +153,7 @@ password `password`.
 
 ```sh
 bun install
-bun run solar dev start
+SOLAR_MOCK_LLM=1 bun run solar dev start
 ```
 
 The managed server uses `scripts/port-allocator.sh` to choose a stable worktree-specific
@@ -166,7 +169,8 @@ with the database.
 bunx @mcowger/solar
 ```
 
-SQLite and attachments are created relative to the current directory by default.
+SQLite, attachments, and pi agent/session state are created relative to the
+current directory by default.
 
 ## Administration
 
@@ -221,6 +225,9 @@ policy; task-model and large-paste settings; and aggregated token usage.
 | `SOLAR_AIRGAP_MODE` / `AIRGAP_MODE` | Set to `1`/`true`/`yes`/`on` to block outbound network calls |
 | `DATABASE_PATH` | SQLite file path |
 | `SOLAR_ATTACHMENTS_DIR` | Local attachment storage directory |
+| `SOLAR_PI_AGENT_DIR` | Persistent pi agent state and canonical conversation sessions |
+| `SOLAR_PI_CWD_ROOT` | Scratch directories used as pi process working directories |
+| `SOLAR_PI_MAX_PROCESSES` | Maximum concurrently live pi RPC children (default `8`) |
 | `PORT` / `PASEO_PORT` | Listening port / managed dev-server override |
 | `SOLAR_MOCK_LLM` | Enable the local zero-cost mock provider |
 
@@ -243,6 +250,33 @@ Google OAuth is enabled when both Google credentials are set. Configure the
 Google OAuth redirect URI as `${BETTER_AUTH_URL}/api/auth/callback/google`.
 Google sign-ins use the verified Google email address to identify and link the
 account; accounts with different email addresses are not linked.
+
+## Migrating legacy chat history
+
+Pi session JSONL is the canonical conversation history. Existing chat-v2 rows
+can be imported ahead of first use with the optional bulk pre-warm script:
+
+```sh
+bun run scripts/import-chat-v2-to-pi.ts --dry-run
+bun run scripts/import-chat-v2-to-pi.ts
+```
+
+Run it with the same `DATABASE_PATH` and `SOLAR_PI_AGENT_DIR` as the server.
+Back up SQLite, attachments, and the complete pi agent directory before an
+import; the normal chat path also imports legacy conversations lazily when they
+are first opened or continued.
+
+## Deployment
+
+```sh
+bun run deploy:staging
+bun run deploy:production
+```
+
+Both commands use `scripts/deploy.ts`. Target-specific overrides use
+`SOLAR_STAGING_*` or `SOLAR_PRODUCTION_*` environment variables. Keep the
+deployment's `/data` volume intact across upgrades: it contains SQLite,
+attachments, and `/data/pi-agent`, including canonical session JSONL.
 
 ## Status
 
@@ -280,7 +314,7 @@ bun run test:e2e:install
 Run E2E tests with `bun run test:e2e` (Chromium) or `bun run test:e2e:all`
 (Chromium, Firefox, WebKit).
 
-### Deployment note
+### Process supervision note
 
 For real deployments prefer a supervisor (systemd `Restart=always` or PM2) —
 `bun run` itself does not restart on crash or rotate logs.

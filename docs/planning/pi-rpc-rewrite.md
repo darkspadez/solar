@@ -1,5 +1,10 @@
 # Solar as an RPC Client to pi-coding-agent
 
+> **Implementation status:** This rewrite is implemented on the current branch.
+> The live engine is under `apps/server/src/pi/`; chat-v2 remains only as a
+> legacy archive, migration, and export layer. The design and rollout notes
+> below are retained as the implementation record.
+
 ## Objective
 
 Replace Solar's hand-rolled message ordering, compaction, and branching

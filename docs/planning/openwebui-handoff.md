@@ -1,6 +1,11 @@
 # Open WebUI Facade Handoff
 
-## Current state
+> **Historical handoff document.** The Open WebUI compatibility facade described
+> here was removed during the pi RPC migration. Its source paths, branch names,
+> test counts, and verification commands are retained as historical context and
+> do not describe the current repository.
+
+## Historical state
 
 - Branch: `feat/openwebui-file-uploads`
 - Facade commits: `044e344 feat(openwebui): add client compatibility facade`,
