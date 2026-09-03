@@ -56,6 +56,10 @@ export function parseOidcConfig(
 			"OIDC_ISSUER must use HTTPS; HTTP is allowed only for localhost, 127.0.0.1, or [::1]",
 		);
 	}
+	const issuerUrl = new URL(issuer);
+	if (issuerUrl.href.includes("?") || issuerUrl.href.includes("#")) {
+		throw new Error("OIDC_ISSUER must not contain a query string or fragment");
+	}
 
 	const scopes = (env.OIDC_SCOPES ?? "")
 		.split(/[\s,]+/)

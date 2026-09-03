@@ -97,6 +97,19 @@ describe("parseOidcConfig", () => {
 		).toBe("http://[::1]:8080/realms/solar");
 	});
 
+	test("rejects issuers with query strings or fragments", () => {
+		for (const issuer of [
+			"https://auth.example.com/realms/solar?tenant=solar",
+			"https://auth.example.com/realms/solar#configuration",
+			"https://auth.example.com/realms/solar?",
+			"https://auth.example.com/realms/solar#",
+		]) {
+			expect(() =>
+				parseOidcConfig({ ...CREDENTIALS, OIDC_ISSUER: issuer }),
+			).toThrow(/query string or fragment/);
+		}
+	});
+
 	test("parses scopes from either separator and always includes openid", () => {
 		expect(
 			parseOidcConfig({ ...CREDENTIALS, OIDC_SCOPES: "openid email groups" })

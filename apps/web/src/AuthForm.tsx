@@ -89,6 +89,7 @@ export function AuthForm() {
 		if (res.error) setError(res.error.message ?? "Authentication failed");
 	}
 
+	/** Starts OIDC sign-in and returns both success and failure to this page. */
 	async function signInWithOidc() {
 		setBusy(true);
 		setError(null);
