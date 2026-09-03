@@ -36,6 +36,7 @@ import {
 	setUserDefault,
 	setUserDefaultPreset,
 } from "../chat/catalog";
+import { applyUserRole, countActiveAdmins } from "../userRoles";
 import type { TrpcContext } from "./context";
 import { getLogLevel, setLogLevel, type SolarLogLevel } from "../logger";
 import { testMcpServer } from "../chat/mcp";
@@ -1201,28 +1202,15 @@ const adminRouter = router({
 			if (
 				target.role === "admin" &&
 				input.role === "user" &&
-				!target.isDisabled
+				!target.isDisabled &&
+				countActiveAdmins() <= 1
 			) {
-				const admins = sqlite
-					.query(
-						"SELECT COUNT(*) AS count FROM user WHERE role = 'admin' AND isDisabled = 0",
-					)
-					.get() as { count: number };
-				if (admins.count <= 1) {
-					throw new TRPCError({
-						code: "BAD_REQUEST",
-						message: "At least one active admin is required",
-					});
-				}
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "At least one active admin is required",
+				});
 			}
-			sqlite
-				.query("UPDATE user SET role = ? WHERE id = ?")
-				.run(input.role, input.userId);
-			if (input.role === "user")
-				await db
-					.deleteFrom("apikey")
-					.where("referenceId", "=", input.userId)
-					.execute();
+			await applyUserRole(input.userId, input.role);
 		}),
 
 	listApiKeys: adminProcedure.query(({ ctx }) =>
@@ -1288,18 +1276,16 @@ const adminRouter = router({
 				.query("SELECT role, isDisabled FROM user WHERE id = ?")
 				.get(input.userId) as { role: string; isDisabled: number } | null;
 			if (!target) throw new TRPCError({ code: "NOT_FOUND" });
-			if (input.isDisabled && target.role === "admin" && !target.isDisabled) {
-				const admins = sqlite
-					.query(
-						"SELECT COUNT(*) AS count FROM user WHERE role = 'admin' AND isDisabled = 0",
-					)
-					.get() as { count: number };
-				if (admins.count <= 1) {
-					throw new TRPCError({
-						code: "BAD_REQUEST",
-						message: "At least one active admin is required",
-					});
-				}
+			if (
+				input.isDisabled &&
+				target.role === "admin" &&
+				!target.isDisabled &&
+				countActiveAdmins() <= 1
+			) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "At least one active admin is required",
+				});
 			}
 			sqlite
 				.query("UPDATE user SET isDisabled = ? WHERE id = ?")
@@ -2141,6 +2127,10 @@ export const appRouter = router({
 		google: Boolean(
 			!config.airgapMode && config.googleClientId && config.googleClientSecret,
 		),
+		// Only the button label. The issuer and client id stay server-side; this
+		// query is unauthenticated. OIDC is not disabled by airgap mode because a
+		// self-hosted IdP is the operator's own service, not a third party.
+		oidc: config.oidc ? { displayName: config.oidc.displayName } : null,
 		airgap: config.airgapMode,
 	})),
 

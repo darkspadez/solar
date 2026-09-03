@@ -220,7 +220,11 @@ policy; task-model and large-paste settings; and aggregated token usage.
 | Variable | Purpose |
 | --- | --- |
 | `BETTER_AUTH_SECRET` | Required signing secret; use 32+ random characters |
+| `BETTER_AUTH_URL` | Public base URL; every OAuth redirect URI derives from it |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Optional Google OAuth credentials |
+| `OIDC_ISSUER` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | Optional OpenID Connect provider; all three enable it |
+| `OIDC_DISPLAY_NAME` / `OIDC_SCOPES` / `OIDC_DISABLE_SIGNUP` | Sign-in button label, requested scopes, and whether first sign-in may provision |
+| `OIDC_ADMIN_CLAIM` / `OIDC_ADMIN_VALUE` | Optional group claim and value granting the admin role |
 | `CLOUDFLARE_RADAR_API_TOKEN` | Optional Cloudflare Radar token for source categories |
 | `SOLAR_AIRGAP_MODE` / `AIRGAP_MODE` | Set to `1`/`true`/`yes`/`on` to block outbound network calls |
 | `DATABASE_PATH` | SQLite file path |
@@ -239,6 +243,7 @@ When `SOLAR_AIRGAP_MODE` (or `AIRGAP_MODE`) is active (`1`, `true`, `yes`, or `o
 - **Geocoding** is disabled (browser GPS coordinates are kept, but no reverse-geocoding calls are made to OpenStreetMap Nominatim).
 - **Domain classification** uses local DB cache and bundled registries only, skipping Cloudflare Radar API lookups.
 - **Google OAuth** is disabled and hidden from sign-in options.
+- **OIDC sign-in stays enabled**: a self-hosted identity provider is the operator's own service, not a third-party call.
 - **Citation favicons** are replaced with inline SVG placeholders, suppressing remote favicon fetches in the browser.
 
 Source-category badges use a bundled registry of 300+ news domains derived from
@@ -250,6 +255,46 @@ Google OAuth is enabled when both Google credentials are set. Configure the
 Google OAuth redirect URI as `${BETTER_AUTH_URL}/api/auth/callback/google`.
 Google sign-ins use the verified Google email address to identify and link the
 account; accounts with different email addresses are not linked.
+
+### OIDC / SSO
+
+Solar can sign users in through one self-hosted OpenID Connect provider. Set
+`OIDC_ISSUER`, `OIDC_CLIENT_ID`, and `OIDC_CLIENT_SECRET` to enable it; the
+sign-in page then shows a "Continue with `OIDC_DISPLAY_NAME`" button. Endpoints
+are read from `${OIDC_ISSUER}/.well-known/openid-configuration`, and the flow
+uses PKCE.
+
+Register this redirect URI at the provider:
+
+```
+${BETTER_AUTH_URL}/api/auth/callback/oidc
+```
+
+Issuer values differ by product:
+
+| Provider | `OIDC_ISSUER` | Group claim |
+| --- | --- | --- |
+| Authentik | `https://auth.example.com/application/o/<slug>/` | `groups` |
+| Keycloak | `https://kc.example.com/realms/<realm>` | `realm_access.roles` |
+| Zitadel | `https://<instance>.zitadel.cloud` | `urn:zitadel:iam:org:project:roles` |
+| Authelia | `https://auth.example.com` | `groups` |
+
+A first sign-in creates the Solar account, subject to `AUTH_ALLOWED_DOMAINS`.
+Set `OIDC_DISABLE_SIGNUP=1` to require that an admin create the user first,
+matching Google's behaviour. An IdP identity is linked to an existing account
+when the email addresses match exactly; differing addresses are never linked.
+The first account on a fresh deployment becomes the admin however it signs in.
+
+Setting both `OIDC_ADMIN_CLAIM` and `OIDC_ADMIN_VALUE` maps a group to the admin
+role, re-checked on every OIDC sign-in, so removing someone from the group at
+the provider demotes them (and revokes their API keys) on their next sign-in.
+Solar refuses to demote the last remaining admin. The claim must reach Solar in
+the ID token or the userinfo response: on Keycloak add a mapper with "Add to ID
+token" or "Add to userinfo" enabled, and request whichever scope carries it via
+`OIDC_SCOPES`. Roles stay manually managed in Settings when these are unset.
+
+Sign-ins are PKCE-protected, and when the provider's discovery document
+advertises a JWKS endpoint the ID token's signature and nonce are verified too.
 
 ## Migrating legacy chat history
 
@@ -286,7 +331,8 @@ surface, PWA shell, and remote MCP integration are present; APIs and UI details
 may still evolve.
 
 The project deliberately does **not** include RAG/vector search, voice, image
-generation, channels, enterprise SSO, or horizontal multi-node scaling.
+generation, channels, multi-tenant enterprise SSO (SAML, per-organization
+providers), or horizontal multi-node scaling.
 
 ## Development
 
