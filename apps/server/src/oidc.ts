@@ -53,9 +53,9 @@ export interface OidcProviderConfig {
  * Deliberately no `mapProfileToUser`: fields it returns are filtered against
  * the user schema, and `role` is `input: false`, so a role mapped there would
  * be silently dropped. Role assignment happens in `syncOidcRole` instead. The
- * email-domain allowlist is enforced by the `user.create.before` database hook,
- * whose thrown `APIError` reaches the browser as a readable redirect, unlike a
- * throw from `mapProfileToUser` (which the callback surfaces as raw JSON).
+ * email-domain allowlist is enforced by `user.validateUserInfo` before create,
+ * link, or sign-in; its structured rejection reaches the browser as a readable
+ * redirect, unlike a throw from `mapProfileToUser` (surfaced as raw JSON).
  */
 export function buildOidcProviderConfig(oidc: OidcConfig): OidcProviderConfig {
 	return {

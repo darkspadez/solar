@@ -262,7 +262,9 @@ Solar can sign users in through one self-hosted OpenID Connect provider. Set
 `OIDC_ISSUER`, `OIDC_CLIENT_ID`, and `OIDC_CLIENT_SECRET` to enable it; the
 sign-in page then shows a "Continue with `OIDC_DISPLAY_NAME`" button. Endpoints
 are read from `${OIDC_ISSUER}/.well-known/openid-configuration`, and the flow
-uses PKCE.
+uses PKCE. The issuer and discovered userinfo endpoint must use HTTPS; cleartext
+HTTP is accepted only for `localhost`, `127.0.0.1`, and `[::1]` development
+endpoints.
 
 Register this redirect URI at the provider:
 
