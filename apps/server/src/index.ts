@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { getLogLevel, logger } from "./logger";
 import { config } from "./config";
 import { auth } from "./auth";
+import { OAUTH_CALLBACK_PATH, oauthCallbackPathIsRegistered } from "./oidc";
 import type {} from "./db";
 import { db, sqlite } from "./db";
 import { migrateAuth } from "./db/migrate-auth";
@@ -114,6 +115,42 @@ if (
 	logger.warn(
 		"BETTER_AUTH_SECRET is missing, short, or uses the development fallback",
 	);
+}
+
+// OIDC needs all three of issuer, client id, and client secret; a partial set
+// silently leaves sign-in unavailable, so say so instead.
+const oidcParts = [
+	process.env.OIDC_ISSUER,
+	process.env.OIDC_CLIENT_ID,
+	process.env.OIDC_CLIENT_SECRET,
+].filter((value) => Boolean(value?.trim()));
+if (oidcParts.length > 0 && oidcParts.length < 3) {
+	logger.warn(
+		"OIDC is partially configured and disabled; set OIDC_ISSUER, OIDC_CLIENT_ID, and OIDC_CLIENT_SECRET",
+	);
+}
+if (
+	Boolean(process.env.OIDC_ADMIN_CLAIM?.trim()) !==
+	Boolean(process.env.OIDC_ADMIN_VALUE?.trim())
+) {
+	logger.warn(
+		"OIDC role mapping is disabled; OIDC_ADMIN_CLAIM and OIDC_ADMIN_VALUE must both be set",
+	);
+}
+// Role sync hangs off Better Auth's OAuth callback route. If a future release
+// renames it the hook would just stop firing, freezing every admin role with
+// nothing in the log, so fail loudly here instead.
+if (config.oidc?.adminClaim) {
+	const registeredPaths = Object.values(
+		auth.api as unknown as Record<string, { path?: string }>,
+	).map((endpoint) => endpoint?.path);
+	if (!oauthCallbackPathIsRegistered(registeredPaths)) {
+		logger
+			.withMetadata({ expected: OAUTH_CALLBACK_PATH })
+			.error(
+				"OIDC role mapping will not run: better-auth no longer registers the expected OAuth callback route",
+			);
+	}
 }
 
 // Provision the single solar.db: our app migrations + Better Auth's own tables.

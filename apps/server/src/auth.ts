@@ -1,20 +1,54 @@
 import { betterAuth, type BetterAuthPlugin } from "better-auth";
-import { APIError } from "better-auth/api";
+import { APIError, createAuthMiddleware } from "better-auth/api";
+import { genericOAuth } from "better-auth/plugins";
 import { apiKey } from "@better-auth/api-key";
+import {
+	CREDENTIAL_ACCOUNT_ISSUER,
+	CREDENTIAL_PROVIDER_ID,
+} from "./accountIssuer";
 import { config } from "./config";
 import { dialect, sqlite } from "./db";
 import { getSolarImpersonation } from "./impersonation";
+import {
+	buildOidcProviderConfig,
+	OAUTH_CALLBACK_PATH,
+	OIDC_PROVIDER_ID,
+	syncOidcRole,
+} from "./oidc";
 
 export const API_KEY_HEADER = "x-api-key";
 
-/** Throws unless the email's domain is on the (optional) allowlist. */
-function assertAllowedEmailDomain(email: string): void {
+interface EmailDomainValidationError {
+	error: "EMAIL_DOMAIN_NOT_ALLOWED";
+	errorDescription: string;
+}
+
+/** Returns the browser-safe rejection details when an email violates policy. */
+function emailDomainValidationError(
+	email: unknown,
+): EmailDomainValidationError | undefined {
 	const allowed = config.allowedEmailDomains;
 	if (allowed.length === 0) return;
-	const domain = email.split("@").at(-1)?.toLowerCase();
+	const domain =
+		typeof email === "string" ? email.split("@").at(-1)?.toLowerCase() : null;
 	if (!domain || !allowed.includes(domain)) {
+		return {
+			error: "EMAIL_DOMAIN_NOT_ALLOWED",
+			errorDescription: "Email domain is not allowed",
+		};
+	}
+}
+
+/** Throws unless the email's domain is on the (optional) allowlist. */
+function assertAllowedEmailDomain(email: string): void {
+	const rejection = emailDomainValidationError(email);
+	if (rejection) {
+		// The OAuth callback turns a thrown error into a redirect only when the
+		// body carries a `code`. Without one the browser is left on the callback
+		// URL showing raw JSON instead of the sign-in page.
 		throw new APIError("FORBIDDEN", {
-			message: "Email domain is not allowed",
+			code: rejection.error,
+			message: rejection.errorDescription,
 		});
 	}
 }
@@ -56,12 +90,14 @@ export const auth = betterAuth({
 	account: {
 		accountLinking: {
 			enabled: true,
-			trustedProviders: ["google"],
+			trustedProviders: ["google", OIDC_PROVIDER_ID],
 			allowDifferentEmails: false,
 			// This app has no local email-verification flow, so email/password
 			// accounts are never marked verified. Without this opt-out, Better Auth
-			// refuses to implicitly link a Google sign-in to an existing local
-			// account. Google's verified-email claim is the linking trust anchor.
+			// refuses to implicitly link a Google or OIDC sign-in to an existing
+			// local account. Trusting these providers by name is what allows the
+			// link; the identity anchor is the matching email address, since
+			// `allowDifferentEmails` stays off.
 			requireLocalEmailVerified: false,
 		},
 	},
@@ -77,8 +113,22 @@ export const auth = betterAuth({
 			rateLimit: { enabled: false },
 			enableSessionForAPIKeys: true,
 		}) as unknown as BetterAuthPlugin,
+		// Optional self-hosted identity provider. Since 1.7 it adds no routes of
+		// its own and rides the built-in social endpoints, `/sign-in/social` and
+		// `/callback/:id`, both covered by the `/api/auth/*` GET+POST forward in
+		// `index.ts`.
+		...(config.oidc
+			? [genericOAuth({ config: [buildOidcProviderConfig(config.oidc)] })]
+			: []),
 	],
 	user: {
+		// Generic OAuth invokes this before create, link, and returning sign-in.
+		// Returning structured details lets its callback preserve the readable
+		// redirect instead of converting a thrown hook error to validation_failed.
+		validateUserInfo: ({ user, source }) => {
+			if (source.oauth?.providerId !== OIDC_PROVIDER_ID) return;
+			return emailDomainValidationError(user.email);
+		},
 		additionalFields: {
 			// Admin/user roles (full enforcement + admin UI land in M4). Assigned by
 			// the server, never accepted from client input.
@@ -86,13 +136,34 @@ export const auth = betterAuth({
 			isDisabled: { type: "boolean", defaultValue: false, input: false },
 		},
 	},
+	// Re-apply the admin role from the IdP's group claim after every OIDC
+	// sign-in. It cannot live in the provider's `mapProfileToUser`: fields it
+	// returns are filtered against the user schema and `role` is `input: false`,
+	// so the value would be dropped. By the time this runs the account row holds
+	// a fresh ID token and the session exists.
+	//
+	// `/callback/:id` is the shared OAuth callback, so Google arrives here too;
+	// the provider id is what selects OIDC sign-ins.
+	...(config.oidc?.adminClaim
+		? {
+				hooks: {
+					after: createAuthMiddleware(async (ctx) => {
+						if (ctx.path !== OAUTH_CALLBACK_PATH) return;
+						if (ctx.params?.id !== OIDC_PROVIDER_ID) return;
+						const newSession = ctx.context.newSession;
+						if (!newSession) return;
+						await syncOidcRole(newSession.user.id, ctx.context);
+					}),
+				},
+			}
+		: {}),
 	databaseHooks: {
 		user: {
 			create: {
 				// First account to register on a deployment becomes the admin.
 				before: async (user) => {
-					// Covers email/password registration (Google is also checked
-					// earlier in mapProfileToUser).
+					// Covers email/password registration as a final persistence-layer
+					// guard. Google and OIDC are checked earlier in their provider flows.
 					assertAllowedEmailDomain(user.email);
 					const row = sqlite.query("SELECT COUNT(*) AS c FROM user").get() as {
 						c: number;
@@ -109,7 +180,12 @@ export const auth = betterAuth({
 						.query("SELECT isDisabled FROM user WHERE id = ?")
 						.get(session.userId) as { isDisabled: number } | null;
 					if (user?.isDisabled) {
+						// The OAuth callback only converts a thrown error into a
+						// redirect when the body carries a `code`; without one a
+						// disabled user would be stranded on the callback URL
+						// looking at raw JSON.
 						throw new APIError("FORBIDDEN", {
+							code: "ACCOUNT_DISABLED",
 							message: "This account is disabled",
 						});
 					}
@@ -207,7 +283,8 @@ export async function setSolarUserPassword(
 	} else {
 		await context.internalAdapter.createAccount({
 			userId,
-			providerId: "credential",
+			providerId: CREDENTIAL_PROVIDER_ID,
+			issuer: CREDENTIAL_ACCOUNT_ISSUER,
 			accountId: userId,
 			password: hashedPassword,
 		});
