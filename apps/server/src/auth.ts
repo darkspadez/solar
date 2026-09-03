@@ -18,18 +18,37 @@ import {
 
 export const API_KEY_HEADER = "x-api-key";
 
-/** Throws unless the email's domain is on the (optional) allowlist. */
-function assertAllowedEmailDomain(email: string): void {
+interface EmailDomainValidationError {
+	error: "EMAIL_DOMAIN_NOT_ALLOWED";
+	errorDescription: string;
+}
+
+/** Returns the browser-safe rejection details when an email violates policy. */
+function emailDomainValidationError(
+	email: unknown,
+): EmailDomainValidationError | undefined {
 	const allowed = config.allowedEmailDomains;
 	if (allowed.length === 0) return;
-	const domain = email.split("@").at(-1)?.toLowerCase();
+	const domain =
+		typeof email === "string" ? email.split("@").at(-1)?.toLowerCase() : null;
 	if (!domain || !allowed.includes(domain)) {
+		return {
+			error: "EMAIL_DOMAIN_NOT_ALLOWED",
+			errorDescription: "Email domain is not allowed",
+		};
+	}
+}
+
+/** Throws unless the email's domain is on the (optional) allowlist. */
+function assertAllowedEmailDomain(email: string): void {
+	const rejection = emailDomainValidationError(email);
+	if (rejection) {
 		// The OAuth callback turns a thrown error into a redirect only when the
 		// body carries a `code`. Without one the browser is left on the callback
 		// URL showing raw JSON instead of the sign-in page.
 		throw new APIError("FORBIDDEN", {
-			code: "EMAIL_DOMAIN_NOT_ALLOWED",
-			message: "Email domain is not allowed",
+			code: rejection.error,
+			message: rejection.errorDescription,
 		});
 	}
 }
@@ -103,6 +122,13 @@ export const auth = betterAuth({
 			: []),
 	],
 	user: {
+		// Generic OAuth invokes this before create, link, and returning sign-in.
+		// Returning structured details lets its callback preserve the readable
+		// redirect instead of converting a thrown hook error to validation_failed.
+		validateUserInfo: ({ user, source }) => {
+			if (source.oauth?.providerId !== OIDC_PROVIDER_ID) return;
+			return emailDomainValidationError(user.email);
+		},
 		additionalFields: {
 			// Admin/user roles (full enforcement + admin UI land in M4). Assigned by
 			// the server, never accepted from client input.
@@ -136,10 +162,8 @@ export const auth = betterAuth({
 			create: {
 				// First account to register on a deployment becomes the admin.
 				before: async (user) => {
-					// Covers email/password registration and OIDC provisioning, and
-					// is the only allowlist gate for OIDC (Google is also checked
-					// earlier in mapProfileToUser). Throwing here reaches an OIDC
-					// user as a readable redirect back to the sign-in page.
+					// Covers email/password registration as a final persistence-layer
+					// guard. Google and OIDC are checked earlier in their provider flows.
 					assertAllowedEmailDomain(user.email);
 					const row = sqlite.query("SELECT COUNT(*) AS c FROM user").get() as {
 						c: number;

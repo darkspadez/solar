@@ -1,6 +1,7 @@
 import { config, type OidcConfig } from "./config";
 import { sqlite } from "./db";
 import { logger } from "./logger";
+import { isSecureOidcUrl } from "./oidcUrl";
 import { applyUserRole, countActiveAdmins, type UserRole } from "./userRoles";
 
 /**
@@ -18,6 +19,7 @@ export const OIDC_PROVIDER_ID = "oidc";
  * checks it against the registered routes at startup.
  */
 export const OAUTH_CALLBACK_PATH = "/callback/:id";
+const OIDC_FETCH_TIMEOUT_MS = 10_000;
 
 /**
  * Whether Better Auth still registers the callback route the role-sync hook
@@ -160,17 +162,25 @@ export function resetOidcDiscoveryCache(): void {
 	userInfoEndpoint = null;
 }
 
+/** Fetches and validates the discovery document's userinfo endpoint. */
 async function fetchUserInfoEndpoint(
 	discoveryUrl: string,
 ): Promise<string | null> {
-	const response = await fetch(discoveryUrl);
+	const response = await fetch(discoveryUrl, {
+		redirect: "error",
+		signal: AbortSignal.timeout(OIDC_FETCH_TIMEOUT_MS),
+	});
 	if (!response.ok) return null;
 	const document = (await response.json()) as { userinfo_endpoint?: unknown };
-	return typeof document.userinfo_endpoint === "string"
-		? document.userinfo_endpoint
-		: null;
+	if (
+		typeof document.userinfo_endpoint !== "string" ||
+		!isSecureOidcUrl(document.userinfo_endpoint)
+	)
+		return null;
+	return new URL(document.userinfo_endpoint).toString();
 }
 
+/** Memoizes successful discovery while retrying transient failures. */
 async function getUserInfoEndpoint(
 	discoveryUrl: string,
 ): Promise<string | null> {
@@ -183,6 +193,7 @@ async function getUserInfoEndpoint(
 
 interface OidcAccount {
 	providerId: string;
+	issuer: string;
 	idToken?: string | null;
 	accessToken?: string | null;
 }
@@ -227,6 +238,8 @@ async function resolveClaims(
 	try {
 		const response = await fetch(endpoint, {
 			headers: { Authorization: `Bearer ${account.accessToken}` },
+			redirect: "error",
+			signal: AbortSignal.timeout(OIDC_FETCH_TIMEOUT_MS),
 		});
 		if (!response.ok) return null;
 		const profile: unknown = await response.json();
@@ -255,7 +268,8 @@ export async function syncOidcRole(
 	try {
 		const accounts = await context.internalAdapter.findAccounts(userId);
 		const account = accounts.find(
-			(entry) => entry.providerId === OIDC_PROVIDER_ID,
+			(entry) =>
+				entry.providerId === OIDC_PROVIDER_ID && entry.issuer === oidc.issuer,
 		);
 		if (!account) return;
 

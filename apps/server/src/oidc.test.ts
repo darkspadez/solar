@@ -65,10 +65,22 @@ function idToken(claims: Record<string, unknown>): string {
 }
 
 function contextWith(account: Record<string, unknown> | null) {
+	const normalized =
+		account?.providerId === OIDC_PROVIDER_ID
+			? { issuer: baseConfig().issuer, ...account }
+			: account;
 	return {
 		internalAdapter: {
 			findAccounts: async () =>
-				account ? [account as never] : ([] as never[]),
+				normalized ? [normalized as never] : ([] as never[]),
+		},
+	};
+}
+
+function contextWithAccounts(accounts: Record<string, unknown>[]) {
+	return {
+		internalAdapter: {
+			findAccounts: async () => accounts as never[],
 		},
 	};
 }
@@ -273,12 +285,14 @@ describe("syncOidcRole", () => {
 
 	test("falls back to userinfo when the claim is absent from the token", async () => {
 		const seen: string[] = [];
+		const requestOptions: (RequestInit | undefined)[] = [];
 		globalThis.fetch = (async (
 			input: string | URL | Request,
 			init?: RequestInit,
 		) => {
 			const url = String(input);
 			seen.push(url);
+			requestOptions.push(init);
 			if (url.endsWith("/.well-known/openid-configuration"))
 				return Response.json({
 					userinfo_endpoint: "https://auth.example.com/userinfo",
@@ -302,7 +316,61 @@ describe("syncOidcRole", () => {
 			"https://auth.example.com/.well-known/openid-configuration",
 			"https://auth.example.com/userinfo",
 		]);
+		expect(requestOptions).toHaveLength(2);
+		for (const options of requestOptions) {
+			expect(options?.redirect).toBe("error");
+			expect(options?.signal).toBeInstanceOf(AbortSignal);
+		}
 		expect(roleWrites).toEqual([{ userId: "u1", role: "admin" }]);
+	});
+
+	test.each([
+		"http://auth.example.com/userinfo",
+		"file:///tmp/userinfo",
+		"not a URL",
+	])(
+		"does not send an access token to an unsafe userinfo URL: %s",
+		async (endpoint) => {
+			const seen: string[] = [];
+			globalThis.fetch = (async (input: string | URL | Request) => {
+				seen.push(String(input));
+				return Response.json({ userinfo_endpoint: endpoint });
+			}) as unknown as typeof fetch;
+
+			await syncOidcRole(
+				"u1",
+				contextWith({
+					providerId: OIDC_PROVIDER_ID,
+					idToken: idToken({ sub: "1" }),
+					accessToken: "must-not-leak",
+				}),
+			);
+
+			expect(seen).toEqual([
+				"https://auth.example.com/.well-known/openid-configuration",
+			]);
+			expect(roleWrites).toEqual([]);
+		},
+	);
+
+	test("uses only the account belonging to the configured issuer", async () => {
+		await syncOidcRole(
+			"u1",
+			contextWithAccounts([
+				{
+					providerId: OIDC_PROVIDER_ID,
+					issuer: "https://old-idp.example.com/",
+					idToken: idToken({ groups: ["solar-admins"] }),
+				},
+				{
+					providerId: OIDC_PROVIDER_ID,
+					issuer: baseConfig().issuer,
+					idToken: idToken({ groups: ["users"] }),
+				},
+			]),
+		);
+
+		expect(roleWrites).toEqual([]);
 	});
 
 	test("demotes when userinfo answers without the group", async () => {

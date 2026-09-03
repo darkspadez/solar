@@ -1,3 +1,5 @@
+import { isSecureOidcUrl } from "./oidcUrl";
+
 /** Runtime configuration from environment variables. */
 const authBaseURL =
 	process.env.BETTER_AUTH_URL ??
@@ -49,6 +51,11 @@ export function parseOidcConfig(
 	const clientId = env.OIDC_CLIENT_ID?.trim();
 	const clientSecret = env.OIDC_CLIENT_SECRET?.trim();
 	if (!issuer || !clientId || !clientSecret) return null;
+	if (!isSecureOidcUrl(issuer)) {
+		throw new Error(
+			"OIDC_ISSUER must use HTTPS; HTTP is allowed only for localhost, 127.0.0.1, or [::1]",
+		);
+	}
 
 	const scopes = (env.OIDC_SCOPES ?? "")
 		.split(/[\s,]+/)

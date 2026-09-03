@@ -4,6 +4,7 @@ import { auth } from "../auth";
 import { logger } from "../logger";
 import { sqlite } from "./index";
 
+/** Returns a table's current columns, or an empty list before it exists. */
 function columnNames(table: string): string[] {
 	const columns = sqlite.query(`PRAGMA table_info(${table})`).all() as {
 		name: string;
@@ -34,13 +35,13 @@ function ensureAccountIssuerIndex(): void {
 		logger.info(`created ${ACCOUNT_ISSUER_INDEX}`);
 	} catch (error) {
 		// Only reachable if the table already holds two rows for one external
-		// identity. Leave the server running and name the problem, since the
-		// index is a safety net rather than something existing flows depend on.
+		// identity. Authentication must not start without its identity constraint.
 		logger
 			.withError(error)
 			.error(
 				`could not create ${ACCOUNT_ISSUER_INDEX}; resolve duplicate (issuer, accountId) rows in the account table`,
 			);
+		throw error;
 	}
 }
 
@@ -61,15 +62,20 @@ function backfillAccountIssuer(): void {
 		sqlite.exec(
 			"ALTER TABLE account ADD COLUMN issuer TEXT NOT NULL DEFAULT ''",
 		);
-		const providers = sqlite
-			.query("SELECT DISTINCT providerId FROM account")
-			.all() as { providerId: string }[];
-		const update = sqlite.query(
-			"UPDATE account SET issuer = ? WHERE providerId = ?",
-		);
-		for (const { providerId } of providers) {
-			update.run(accountIssuerFor(providerId), providerId);
-		}
+	}
+
+	// Run on every startup so an interruption after ALTER TABLE cannot strand
+	// rows at the temporary empty default and break identity lookup permanently.
+	const providers = sqlite
+		.query("SELECT DISTINCT providerId FROM account WHERE issuer = ''")
+		.all() as { providerId: string }[];
+	const update = sqlite.query(
+		"UPDATE account SET issuer = ? WHERE providerId = ? AND issuer = ''",
+	);
+	for (const { providerId } of providers) {
+		update.run(accountIssuerFor(providerId), providerId);
+	}
+	if (providers.length > 0) {
 		logger
 			.withMetadata({
 				providers: providers.map((row) => row.providerId),

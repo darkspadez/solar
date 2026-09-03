@@ -64,6 +64,39 @@ describe("parseOidcConfig", () => {
 		).toBe(issuer);
 	});
 
+	test("rejects cleartext public issuers and non-HTTP URL schemes", () => {
+		expect(() =>
+			parseOidcConfig({
+				...CREDENTIALS,
+				OIDC_ISSUER: "http://auth.example.com",
+			}),
+		).toThrow(/HTTPS/);
+		expect(() =>
+			parseOidcConfig({ ...CREDENTIALS, OIDC_ISSUER: "file:///tmp/oidc" }),
+		).toThrow(/HTTPS/);
+	});
+
+	test("allows cleartext issuers only on explicit loopback hosts", () => {
+		expect(
+			parseOidcConfig({
+				...CREDENTIALS,
+				OIDC_ISSUER: "http://localhost:8080/realms/solar",
+			})?.issuer,
+		).toBe("http://localhost:8080/realms/solar");
+		expect(
+			parseOidcConfig({
+				...CREDENTIALS,
+				OIDC_ISSUER: "http://127.0.0.1:8080/realms/solar",
+			})?.issuer,
+		).toBe("http://127.0.0.1:8080/realms/solar");
+		expect(
+			parseOidcConfig({
+				...CREDENTIALS,
+				OIDC_ISSUER: "http://[::1]:8080/realms/solar",
+			})?.issuer,
+		).toBe("http://[::1]:8080/realms/solar");
+	});
+
 	test("parses scopes from either separator and always includes openid", () => {
 		expect(
 			parseOidcConfig({ ...CREDENTIALS, OIDC_SCOPES: "openid email groups" })
