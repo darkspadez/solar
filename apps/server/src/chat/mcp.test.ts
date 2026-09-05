@@ -37,6 +37,30 @@ describe("discoverMcpServer", () => {
 		expect(found.capabilities).toEqual({ prompts: false, resources: false });
 	});
 
+	test("lists tools even when the server did not declare the tools capability", async () => {
+		// Proxies, gateways and older frameworks answer tools/list without
+		// advertising `tools`. Trusting the declaration there would drop every
+		// tool with no error. Only the optional prompts/resources calls are
+		// gated; tools/list is always asked, as it was before this change.
+		const stub = {
+			getServerCapabilities: () => ({}),
+			listTools: async () => ({
+				tools: [{ name: "search", inputSchema: { type: "object" } }],
+			}),
+			listPrompts: async () => {
+				throw new Error("prompts/list must not be called");
+			},
+			listResources: async () => {
+				throw new Error("resources/list must not be called");
+			},
+		} as unknown as Client;
+		const found = await discoverMcpServer(stub);
+		expect(found.tools.map((tool) => tool.name)).toEqual(["search"]);
+		expect(found.prompts).toEqual([]);
+		expect(found.resources).toEqual([]);
+		expect(found.capabilities).toEqual({ prompts: false, resources: false });
+	});
+
 	test("still lists prompts and resources when the server declares them", async () => {
 		const server = new McpServer({ name: "full", version: "1.0.0" });
 		server.registerTool("t", { description: "t" }, echo);

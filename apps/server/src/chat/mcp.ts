@@ -69,16 +69,19 @@ export interface McpDiscovery {
 }
 
 /**
- * Lists what a connected server offers, asking only for the capabilities it
- * declared during initialize. A server without the `prompts` capability
- * answers `prompts/list` with JSON-RPC -32601 (Method not found); listing
- * everything unconditionally turned that into a thrown error, and a
- * tools-only server (most search or fetch servers) was silently dropped.
+ * Lists what a connected server offers. tools/list is always asked, as
+ * before: proxies, gateways and older frameworks answer it without
+ * advertising the `tools` capability, and trusting the declaration there
+ * would drop every tool with no error. The optional prompts/resources lists
+ * are asked only when declared: a server without the `prompts` capability
+ * answers `prompts/list` with JSON-RPC -32601 (Method not found), and
+ * listing it unconditionally turned that into a thrown error that silently
+ * dropped every tools-only server (most search or fetch servers).
  */
 export async function discoverMcpServer(client: Client): Promise<McpDiscovery> {
 	const declared = client.getServerCapabilities() ?? {};
 	const [tools, prompts, resources] = await Promise.all([
-		declared.tools ? client.listTools() : Promise.resolve({ tools: [] }),
+		client.listTools(),
 		declared.prompts ? client.listPrompts() : Promise.resolve({ prompts: [] }),
 		declared.resources
 			? client.listResources()
