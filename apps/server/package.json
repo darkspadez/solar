@@ -14,7 +14,7 @@
 		"codegen": "kysely-codegen --dialect sqlite --url solar.db --out-file src/db/types.generated.ts"
 	},
 	"dependencies": {
-		"@better-auth/api-key": "^1.6.23",
+		"@better-auth/api-key": "1.7.2",
 		"@earendil-works/pi-agent-core": "0.80.10",
 		"@earendil-works/pi-ai": "0.80.10",
 		"@earendil-works/pi-coding-agent": "0.84.2",
@@ -24,7 +24,7 @@
 		"@solar/web": "workspace:*",
 		"@struktoai/mirage-node": "^0.0.3",
 		"@trpc/server": "^11.0.0",
-		"better-auth": "^1.6.23",
+		"better-auth": "1.7.2",
 		"bun-plugin-tailwind": "^0.1.2",
 		"hono": "^4.6.0",
 		"kysely": "^0.27.4",

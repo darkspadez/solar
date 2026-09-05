@@ -1,3 +1,5 @@
+import { isSecureOidcUrl } from "./oidcUrl";
+
 /** Runtime configuration from environment variables. */
 const authBaseURL =
 	process.env.BETTER_AUTH_URL ??
@@ -13,6 +15,76 @@ function isTruthy(value?: string): boolean {
 
 export { isTruthy };
 
+/** Resolved settings for the optional OpenID Connect provider. */
+export interface OidcConfig {
+	/**
+	 * Issuer exactly as configured. Passed to Better Auth as `issuer`, which
+	 * compares it byte-for-byte with the `iss` callback parameter, so a trailing
+	 * slash (Authentik) must survive untouched.
+	 */
+	issuer: string;
+	discoveryUrl: string;
+	clientId: string;
+	clientSecret: string;
+	/** Label for the sign-in button ("Continue with <name>"). */
+	displayName: string;
+	scopes: string[];
+	/** When true, only admin-created users may sign in through the IdP. */
+	disableSignUp: boolean;
+	/** Claim path holding group membership, e.g. `realm_access.roles`. */
+	adminClaim?: string;
+	/** Claim value that grants the admin role. */
+	adminValue?: string;
+}
+
+const DEFAULT_OIDC_SCOPES = ["openid", "profile", "email"];
+
+/**
+ * Reads the `OIDC_*` environment into a provider config. Returns null unless the
+ * issuer and both credentials are present; that triple is what enables OIDC,
+ * mirroring how the Google client id/secret pair enables Google.
+ */
+export function parseOidcConfig(
+	env: Record<string, string | undefined>,
+): OidcConfig | null {
+	const issuer = env.OIDC_ISSUER?.trim();
+	const clientId = env.OIDC_CLIENT_ID?.trim();
+	const clientSecret = env.OIDC_CLIENT_SECRET?.trim();
+	if (!issuer || !clientId || !clientSecret) return null;
+	if (!isSecureOidcUrl(issuer)) {
+		throw new Error(
+			"OIDC_ISSUER must use HTTPS; HTTP is allowed only for localhost, 127.0.0.1, or [::1]",
+		);
+	}
+	const issuerUrl = new URL(issuer);
+	if (issuerUrl.href.includes("?") || issuerUrl.href.includes("#")) {
+		throw new Error("OIDC_ISSUER must not contain a query string or fragment");
+	}
+
+	const scopes = (env.OIDC_SCOPES ?? "")
+		.split(/[\s,]+/)
+		.map((scope) => scope.trim())
+		.filter(Boolean);
+	if (scopes.length === 0) scopes.push(...DEFAULT_OIDC_SCOPES);
+	if (!scopes.includes("openid")) scopes.unshift("openid");
+
+	// Role sync needs both halves; one without the other is a misconfiguration
+	// that `index.ts` warns about at startup.
+	const adminClaim = env.OIDC_ADMIN_CLAIM?.trim();
+	const adminValue = env.OIDC_ADMIN_VALUE?.trim();
+
+	return {
+		issuer,
+		discoveryUrl: `${issuer.replace(/\/+$/, "")}/.well-known/openid-configuration`,
+		clientId,
+		clientSecret,
+		displayName: env.OIDC_DISPLAY_NAME?.trim() || "SSO",
+		scopes,
+		disableSignUp: isTruthy(env.OIDC_DISABLE_SIGNUP),
+		...(adminClaim && adminValue ? { adminClaim, adminValue } : {}),
+	};
+}
+
 export const config = {
 	port: Number(process.env.PORT ?? 3000),
 	dbPath: process.env.DATABASE_PATH ?? "solar.db",
@@ -20,9 +92,13 @@ export const config = {
 	authBaseURL,
 	googleClientId: process.env.GOOGLE_CLIENT_ID,
 	googleClientSecret: process.env.GOOGLE_CLIENT_SECRET,
+	// Optional self-hosted OpenID Connect provider (Authentik, Keycloak,
+	// Zitadel, Authelia). Null when not configured. Unlike Google this stays
+	// enabled in airgap mode: the IdP is the operator's own, not a third party.
+	oidc: parseOidcConfig(process.env),
 	cloudflareRadarApiToken: process.env.CLOUDFLARE_RADAR_API_TOKEN,
 	// Optional comma-separated list of email domains allowed to sign up or sign
-	// in (Google and email/password). Empty means any domain is allowed.
+	// in (Google, OIDC, and email/password). Empty means any domain is allowed.
 	allowedEmailDomains: (process.env.AUTH_ALLOWED_DOMAINS ?? "")
 		.split(",")
 		.map((domain) => domain.trim().toLowerCase())
