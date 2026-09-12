@@ -153,15 +153,19 @@ password `password`.
 
 ```sh
 bun install
-SOLAR_MOCK_LLM=1 bun run solar dev start
+SOLAR_MOCK_LLM=1 bun run dev
 ```
 
 The managed server uses `scripts/port-allocator.sh` to choose a stable worktree-specific
-port in the `3000–3999` range, consistent whether started manually or as a Paseo service
-(`paseo.json`). Set `PORT` or `PASEO_PORT` to override it. Use `SOLAR_MOCK_LLM=1` to exercise the
+port in the `3000–3999` range. Set `PORT` to override it. Use `SOLAR_MOCK_LLM=1` to exercise the
 full UI with a zero-cost local generator. On an empty development database, it
 prints the seeded admin login and generated Development API key, which persists
 with the database.
+
+To expose the local server through FRP, install `frpc` and set
+`FRPC_SERVER_ADDR` and `FRPC_AUTH_TOKEN`. Solar starts the tunnel after `/healthz`
+is ready. `FRPC_SERVER_PORT` defaults to `7000`; `FRPC_SUBDOMAIN_HOST` optionally
+adds the public hostname to the logged URL.
 
 ### Bun package (after publishing)
 
@@ -232,7 +236,10 @@ policy; task-model and large-paste settings; and aggregated token usage.
 | `SOLAR_PI_AGENT_DIR` | Persistent pi agent state and canonical conversation sessions |
 | `SOLAR_PI_CWD_ROOT` | Scratch directories used as pi process working directories |
 | `SOLAR_PI_MAX_PROCESSES` | Maximum concurrently live pi RPC children (default `8`) |
-| `PORT` / `PASEO_PORT` | Listening port / managed dev-server override |
+| `PORT` | Listening port / managed dev-server override |
+| `FRPC_SERVER_ADDR` / `FRPC_AUTH_TOKEN` | Optional FRP server address and token |
+| `FRPC_SERVER_PORT` | Optional FRP control port; defaults to `7000` |
+| `FRPC_SUBDOMAIN_HOST` | Optional FRP public hostname suffix |
 | `SOLAR_MOCK_LLM` | Enable the local zero-cost mock provider |
 
 Provider keys, enabled models, presets, context policies, and MCP servers are

@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
 #
-# Worktree port allocator for Paseo and local solar dev server.
-#
-# When invoked by Paseo as portScript:
-#   Paseo passes ($1=scriptName, $2=workspaceId, $3=branchName, $4=worktreePath)
-#   and sets PASEO_SCRIPTNAME, PASEO_WORKSPACE_ID, PASEO_BRANCH_NAME, PASEO_WORKTREE_PATH.
+# Worktree port allocator for the local Solar dev server.
 #
 # Output: A single port number in the range 3000-3999 printed to stdout.
 #
@@ -13,7 +9,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEFAULT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-TARGET_DIR="${PASEO_WORKTREE_PATH:-${4:-$DEFAULT_ROOT}}"
+TARGET_DIR="${4:-${1:-$DEFAULT_ROOT}}"
 
 if command -v sha256sum >/dev/null 2>&1; then
   digest="$(printf '%s' "$TARGET_DIR" | sha256sum | cut -c1-6)"
