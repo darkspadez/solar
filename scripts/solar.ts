@@ -6,8 +6,6 @@ import { parseArgs } from "node:util";
 
 function defaultLocalUrl(): string {
 	if (process.env.PORT) return `http://localhost:${process.env.PORT}`;
-	if (process.env.PASEO_PORT)
-		return `http://localhost:${process.env.PASEO_PORT}`;
 	try {
 		const log = readFileSync(".dev-server.log", "utf-8");
 		const match = /->\s+(http:\/\/localhost:\d+)/.exec(log);
@@ -241,7 +239,9 @@ if (command === "inspect") {
 		output,
 		`${JSON.stringify({ format: "solar-chat-history-all-users", version: 1, exportedAt: new Date().toISOString(), users: histories }, null, 2)}\n`,
 	);
-	console.log(`Exported chat history for ${histories.length} users to ${output}`);
+	console.log(
+		`Exported chat history for ${histories.length} users to ${output}`,
+	);
 	if (failedUsers.length > 0) {
 		fail(`Failed to export history for: ${failedUsers.join(", ")}`);
 	}
