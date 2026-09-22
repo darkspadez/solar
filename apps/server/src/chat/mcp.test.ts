@@ -107,9 +107,7 @@ describe("MCP capability discovery", () => {
 
 		const tools = await resolveMcpTools("user-1", "conversation-1");
 
-		expect(tools.map((tool) => tool.tool.name)).toEqual([
-			"mcp_server_1_search",
-		]);
+		expect(tools.map((tool) => tool.tool.name)).toEqual(["search"]);
 		expect(logger.warn).toHaveBeenCalledTimes(2);
 	});
 
@@ -120,11 +118,11 @@ describe("MCP capability discovery", () => {
 		const tools = await resolveMcpTools("user-1", "conversation-1");
 
 		expect(tools.map((tool) => tool.tool.name)).toEqual([
-			"mcp_server_1_search",
-			"mcp_server_1_list_prompts",
-			"mcp_server_1_get_prompt",
-			"mcp_server_1_list_resources",
-			"mcp_server_1_read_resource",
+			"search",
+			"list_prompts",
+			"get_prompt",
+			"list_resources",
+			"read_resource",
 		]);
 	});
 

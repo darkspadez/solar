@@ -22,8 +22,12 @@ interface ServerRow {
 
 const CLIENT_INFO = { name: "Solar", version: "0.1.0" };
 const asText = (value: unknown) => JSON.stringify(value, null, 2);
-const toolName = (serverId: string, name: string) =>
-	`mcp_${serverId.replaceAll("-", "_")}_${name}`;
+
+/** Legacy prefix (`mcp_<serverId>_<remote>`) — kept only to decode historic
+ *  tool-call names persisted in pi JSONL before server-id injection was
+ *  removed. New tools use the bare remote name. */
+const legacyToolPrefix = (serverId: string) =>
+	`mcp_${serverId.replaceAll("-", "_")}_`;
 
 function parseHeaders(headers: string): Record<string, string> {
 	try {
@@ -146,11 +150,12 @@ export async function testMcpServer(
 }
 
 /**
- * Maps persisted MCP tool names (`mcp_<serverId>_<remoteName>`, see `toolName`
- * above) back to their display {serverName, remoteName}, without contacting
- * any MCP server. Used to render tool-call chips for history loaded from the
- * DB, where the live per-generation `serverName`/`remoteName` metadata (built
- * while resolving tools for the run) isn't persisted.
+ * Maps legacy persisted MCP tool names (`mcp_<serverId>_<remoteName>`) back
+ * to their display {serverName, remoteName}, without contacting any MCP
+ * server. Used to render tool-call chips for history loaded from the DB,
+ * where the live per-generation `serverName`/`remoteName` metadata (built
+ * while resolving tools for the run) isn't persisted. New tools use the
+ * bare remote name and need no mapping (callers fall back to `name`).
  */
 export async function describeToolNames(
 	names: readonly string[],
@@ -164,7 +169,7 @@ export async function describeToolNames(
 		.execute();
 	for (const name of mcpNames) {
 		for (const server of servers) {
-			const prefix = toolName(server.id, "");
+			const prefix = legacyToolPrefix(server.id);
 			if (name.startsWith(prefix)) {
 				result.set(name, {
 					serverName: server.name,
@@ -213,13 +218,24 @@ export async function resolveMcpTools(
 		(row) => (row.conversationEnabled ?? row.preferenceEnabled ?? 1) === 1,
 	);
 	const result: ResolvedTool[] = [];
+	// Tool names are the bare remote names (no server-id prefix: the 41-char
+	// `mcp_<uuid>_` overhead blew the upstream 64-char function-name limit).
+	// Name collisions across servers are deliberately unhandled (too rare to
+	// be worth the prefix cost) — first server wins so pi never sees a
+	// duplicate `registerTool` name.
+	const seen = new Set<string>();
+	const push = (tool: ResolvedTool) => {
+		if (seen.has(tool.tool.name)) return;
+		seen.add(tool.tool.name);
+		result.push(tool);
+	};
 	for (const server of active) {
 		try {
 			const discovered = await discoverCapabilities(server, conversationId);
 			for (const remote of discovered.tools.tools) {
-				result.push({
+				push({
 					tool: {
-						name: toolName(server.id, remote.name),
+						name: remote.name,
 						description: `[${server.name}] ${remote.description ?? remote.name}`,
 						parameters: Type.Unsafe(remote.inputSchema),
 					},
@@ -239,9 +255,9 @@ export async function resolveMcpTools(
 				});
 			}
 			if (discovered.prompts) {
-				result.push({
+				push({
 					tool: {
-						name: toolName(server.id, "list_prompts"),
+						name: "list_prompts",
 						description: `[${server.name}] List available MCP prompts`,
 						parameters: Type.Object({}),
 					},
@@ -254,9 +270,9 @@ export async function resolveMcpTools(
 						isError: false,
 					}),
 				});
-				result.push({
+				push({
 					tool: {
-						name: toolName(server.id, "get_prompt"),
+						name: "get_prompt",
 						description: `[${server.name}] Get an MCP prompt by name`,
 						parameters: Type.Object({
 							name: Type.String(),
@@ -283,9 +299,9 @@ export async function resolveMcpTools(
 				});
 			}
 			if (discovered.resources) {
-				result.push({
+				push({
 					tool: {
-						name: toolName(server.id, "list_resources"),
+						name: "list_resources",
 						description: `[${server.name}] List available MCP resources`,
 						parameters: Type.Object({}),
 					},
@@ -298,9 +314,9 @@ export async function resolveMcpTools(
 						isError: false,
 					}),
 				});
-				result.push({
+				push({
 					tool: {
-						name: toolName(server.id, "read_resource"),
+						name: "read_resource",
 						description: `[${server.name}] Read an MCP resource by URI`,
 						parameters: Type.Object({ uri: Type.String() }),
 					},
