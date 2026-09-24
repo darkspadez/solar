@@ -13,6 +13,8 @@ import { migrateToLatest } from "./db/migrate";
 import { seedDevUser } from "./db/seed-dev";
 import { attachmentRoutes } from "./chat/attachmentRoutes";
 import { MAX_ATTACHMENT_BYTES } from "./chat/attachments";
+import { imageRoutes } from "./images/routes";
+import { imageGenerationService } from "./images/service";
 import { chatRoutes } from "./chat/routes";
 import { piBridgeRoutes } from "./pi/bridge/server";
 import { piSessionManager } from "./pi/manager";
@@ -72,7 +74,8 @@ function staticCacheControl(pathname: string) {
 		pathname === "/" ||
 		filename === "index.html" ||
 		filename === "manifest.webmanifest" ||
-		filename === "sw.js"
+		filename === "sw.js" ||
+		filename === "favicon.ico"
 	) {
 		return "no-cache";
 	}
@@ -156,6 +159,7 @@ if (config.oidc?.adminClaim) {
 // Provision the single solar.db: our app migrations + Better Auth's own tables.
 await migrateToLatest();
 await migrateAuth();
+await imageGenerationService.recoverActiveAttempts();
 await db
 	.insertInto("app_meta")
 	.values({ key: "schema_version", value: "1" })
@@ -249,6 +253,7 @@ app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
 
 app.route("/api/chat", chatRoutes);
 app.route("/api/attachments", attachmentRoutes);
+app.route("/api/images", imageRoutes);
 
 app.use(
 	"/trpc/*",
@@ -307,11 +312,16 @@ const server = Bun.serve({
 		"/api/chat": dispatchAppRequest,
 		"/api/attachments/*": dispatchAppRequest,
 		"/api/attachments": dispatchAppRequest,
+		"/api/images/*": dispatchAppRequest,
+		"/api/images": dispatchAppRequest,
 		"/api/*": dispatchAppRequest,
 		"/internal/*": dispatchInternalRequest,
 		"/health": dispatchAppRequest,
 		"/healthz": dispatchAppRequest,
 		"/manifest.webmanifest": isProduction
+			? serveProductionWeb
+			: serveDevelopmentPublicFile,
+		"/favicon.ico": isProduction
 			? serveProductionWeb
 			: serveDevelopmentPublicFile,
 		"/icons/*": isProduction ? serveProductionWeb : serveDevelopmentPublicFile,
@@ -338,6 +348,7 @@ logger
 // in-flight requests). Stop accepting connections, drain, close the DB, exit.
 const shutdown = async (signal: string) => {
 	logger.withMetadata({ signal }).info("solar server shutting down");
+	await imageGenerationService.shutdown();
 	await piSessionManager.shutdown();
 	await server.stop();
 	sqlite.close();

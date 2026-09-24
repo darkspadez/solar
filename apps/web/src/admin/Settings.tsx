@@ -12,14 +12,21 @@ interface AllowlistEntry {
 	api: string;
 	visibility: "public" | "private";
 	name?: string;
+	piProvider?: string;
+	piModel?: string;
 	documents?: boolean;
+	image?: {
+		input: boolean;
+		aspectRatios: string[];
+		resolutions: string[];
+	};
 	reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	verbosity?: "low" | "medium" | "high";
 	capabilities?: {
 		reasoningLevels: string[];
 		supportsVerbosity: boolean;
 		contextWindow?: number;
-	};
+	} | null;
 	contextWindow?: number;
 	contextPolicy?: ModelContextPolicy;
 }
@@ -40,12 +47,21 @@ interface ProviderEndpoint {
 	api: string;
 }
 
+interface ImageCatalogModel {
+	id: string;
+	name: string;
+	input: ("text" | "image")[];
+	output: ("image" | "text")[];
+}
+
 interface ProviderForm {
 	provider: string;
 	hasApiKey: boolean;
 	endpoints: ProviderEndpoint[];
 	enabledModels: AllowlistEntry[];
-	apis: string[];
+	imageModels?: AllowlistEntry[];
+	imageCatalogModels?: ImageCatalogModel[];
+	apis: readonly string[];
 }
 
 interface ModelDescriptor {
@@ -210,6 +226,7 @@ function apiLabel(api: string) {
 			"openai-completions": "Chat",
 			"anthropic-messages": "Messages",
 			"google-generative-ai": "Gemini",
+			"openrouter-images": "OpenRouter Images",
 		}[api] ?? api
 	);
 }
@@ -610,10 +627,14 @@ function ProviderCard({ initial }: { initial: ProviderForm }) {
 	const [apiKey, setApiKey] = useState("");
 	const [endpoints, setEndpoints] = useState(initial.endpoints);
 	const [models, setModels] = useState<AllowlistEntry[]>(initial.enabledModels);
+	const [imageModels, setImageModels] = useState<AllowlistEntry[]>(
+		initial.imageModels ?? [],
+	);
 	const [savedConfiguration, setSavedConfiguration] = useState(() =>
 		JSON.stringify({
 			endpoints: initial.endpoints,
 			models: initial.enabledModels,
+			imageModels: initial.imageModels ?? [],
 		}),
 	);
 	const [discovery, setDiscovery] = useState<{
@@ -627,13 +648,15 @@ function ProviderCard({ initial }: { initial: ProviderForm }) {
 	useEffect(() => {
 		setEndpoints(initial.endpoints);
 		setModels(initial.enabledModels);
+		setImageModels(initial.imageModels ?? []);
 		setSavedConfiguration(
 			JSON.stringify({
 				endpoints: initial.endpoints,
 				models: initial.enabledModels,
+				imageModels: initial.imageModels ?? [],
 			}),
 		);
-	}, [initial.endpoints, initial.enabledModels]);
+	}, [initial.endpoints, initial.enabledModels, initial.imageModels]);
 	const save = useMutation(
 		trpc.admin.setProvider.mutationOptions({
 			onSuccess: (_, variables) => {
@@ -642,6 +665,7 @@ function ProviderCard({ initial }: { initial: ProviderForm }) {
 					JSON.stringify({
 						endpoints: variables.endpoints,
 						models: variables.enabledModels,
+						imageModels: variables.imageModels ?? [],
 					}),
 				);
 				qc.invalidateQueries({ queryKey: trpc.admin.listProviders.queryKey() });
@@ -710,6 +734,9 @@ function ProviderCard({ initial }: { initial: ProviderForm }) {
 		setModels((current) =>
 			current.filter((model) => model.endpointId !== endpoint.id),
 		);
+		setImageModels((current) =>
+			current.filter((model) => model.endpointId !== endpoint.id),
+		);
 	};
 	const updateModel = (index: number, patch: Partial<AllowlistEntry>) =>
 		setModels((models) =>
@@ -721,6 +748,10 @@ function ProviderCard({ initial }: { initial: ProviderForm }) {
 		setModels((models) =>
 			models.filter((_, modelIndex) => modelIndex !== index),
 		);
+	const removeImageModel = (index: number) =>
+		setImageModels((models) =>
+			models.filter((_, modelIndex) => modelIndex !== index),
+		);
 	const importableApis = endpoints.map((endpoint) => endpoint.api);
 	const selectedImports = Object.entries(imports).map(([id, selection]) => ({
 		id,
@@ -728,7 +759,7 @@ function ProviderCard({ initial }: { initial: ProviderForm }) {
 	}));
 	const hasChanges =
 		apiKey.length > 0 ||
-		JSON.stringify({ endpoints, models }) !== savedConfiguration;
+		JSON.stringify({ endpoints, models, imageModels }) !== savedConfiguration;
 
 	return (
 		<section className="card card-border bg-base-100 shadow-sm">
@@ -1007,6 +1038,75 @@ function ProviderCard({ initial }: { initial: ProviderForm }) {
 						/>
 					)}
 				</fieldset>
+				{imageModels.length > 0 && (
+					<fieldset className="fieldset gap-1">
+						<legend className="fieldset-legend">Approved image models</legend>
+						<p className="label">
+							Map each configured provider ID to the exact pi-ai catalog model
+							used for the request.
+						</p>
+						<ul className="list divide-y divide-base-300 rounded-box border border-base-300 bg-base-100">
+							{imageModels.map((model, index) => (
+								<li
+									key={`${model.endpointId}/${model.id}`}
+									className="list-row gap-3 px-3 py-3 sm:px-4"
+								>
+									<div className="list-col-grow min-w-0">
+										<p className="truncate font-medium">
+											{model.name ?? model.id}
+										</p>
+										<p className="truncate text-xs opacity-60">{model.id}</p>
+										<label className="mt-2 grid gap-1">
+											<span className="text-xs font-semibold uppercase tracking-wide opacity-60">
+												pi-ai catalog mapping
+											</span>
+											<select
+												className="select select-sm w-full"
+												value={model.piModel ?? ""}
+												onChange={(event) =>
+													setImageModels((current) =>
+														current.map((candidate, candidateIndex) =>
+															candidateIndex === index
+																? {
+																		...candidate,
+																		piProvider: "openrouter",
+																		piModel: event.target.value || undefined,
+																	}
+																: candidate,
+														),
+													)
+												}
+											>
+												<option value="">Select a pi-ai model…</option>
+												{(initial.imageCatalogModels ?? []).map(
+													(catalogModel) => (
+														<option
+															key={catalogModel.id}
+															value={catalogModel.id}
+														>
+															{catalogModel.name} · {catalogModel.id}
+														</option>
+													),
+												)}
+											</select>
+										</label>
+									</div>
+									<span className="badge badge-sm badge-primary badge-soft">
+										Image
+									</span>
+									<button
+										className="btn btn-ghost btn-sm btn-square text-error"
+										type="button"
+										onClick={() => removeImageModel(index)}
+										title="Remove image model"
+									>
+										<X size={16} />
+									</button>
+								</li>
+							))}
+						</ul>
+					</fieldset>
+				)}
 				<div className="card-actions items-center justify-end">
 					{(save.isError ||
 						remove.isError ||
@@ -1049,6 +1149,7 @@ function ProviderCard({ initial }: { initial: ProviderForm }) {
 								apiKey,
 								endpoints,
 								enabledModels: models,
+								imageModels,
 							})
 						}
 						disabled={save.isPending || remove.isPending || !hasChanges}

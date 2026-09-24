@@ -7,6 +7,7 @@ import {
 	formatToolInputPreview,
 	getAssistantStatusState,
 	GroupedToolCalls,
+	getAttachmentImageSource,
 	groupToolCalls,
 	isFileDrag,
 	shouldConvertPastedText,
@@ -14,6 +15,30 @@ import {
 	SummaryEventCard,
 } from "./Thread";
 import type { SolarToolCall } from "./useSolarRuntime";
+
+describe("getAttachmentImageSource", () => {
+	test("uses the uploaded attachment URL before send content exists", () => {
+		expect(
+			getAttachmentImageSource({ id: "attachment-1", type: "image" }),
+		).toBe("/api/attachments/attachment-1");
+	});
+
+	test("prefers complete local image content", () => {
+		expect(
+			getAttachmentImageSource({
+				id: "attachment-1",
+				type: "image",
+				content: [{ type: "image", image: "data:image/png;base64,AA==" }],
+			}),
+		).toBe("data:image/png;base64,AA==");
+	});
+
+	test("does not produce an image source for documents", () => {
+		expect(
+			getAttachmentImageSource({ id: "attachment-1", type: "document" }),
+		).toBeUndefined();
+	});
+});
 
 describe("isFileDrag", () => {
 	test("recognizes file drags without treating text drags as attachments", () => {

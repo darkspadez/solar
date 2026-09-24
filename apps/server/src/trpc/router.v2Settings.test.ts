@@ -48,8 +48,15 @@ const MODEL_DESCRIPTOR = {
 mock.module("../chat/catalog", () => ({
 	MOCK: true,
 	PROVIDER_APIS: ["openai-responses"],
+	ALL_PROVIDER_APIS: ["openai-responses", "openrouter-images"],
 	parseAllowlist: () => [],
+	parseImageAllowlist: () => [],
 	listAvailableModels: async () => [MODEL_DESCRIPTOR],
+	listAvailableImageModels: async () => [],
+	listImageCatalogModels: () => [],
+	resolveImageModel: async () => {
+		throw new Error("resolveImageModel should not be called in this test");
+	},
 	resolveSelection: async (selection: {
 		provider?: string;
 		endpointId?: string;

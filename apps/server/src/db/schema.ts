@@ -109,8 +109,10 @@ export interface ProviderConfigTable {
 	baseUrl: string | null;
 	/** JSON array of configured API endpoints. */
 	endpoints: Generated<string>;
-	/** JSON array of `{ id, api, visibility }` allowlist entries. */
+	/** JSON array of `{ id, api, visibility }` chat allowlist entries. */
 	enabledModels: Generated<string>;
+	/** JSON array of admin-approved image model descriptors. */
+	imageModels: Generated<string>;
 	updatedAt: Generated<string>;
 }
 
@@ -268,6 +270,75 @@ export interface ImpersonationSessionTable {
 	updatedAt: number;
 }
 
+export type ImageAssetKind = "upload" | "generated";
+export type ImageAttemptStatus =
+	| "queued"
+	| "running"
+	| "complete"
+	| "failed"
+	| "interrupted";
+
+export interface ImageWorkspaceTable {
+	id: string;
+	/** FK -> Better Auth `user.id`; image workspaces are owner-private. */
+	userId: string;
+	title: string;
+	/** Current UI defaults; each attempt snapshots these values. */
+	modelId: string | null;
+	aspectRatio: string | null;
+	resolution: string | null;
+	createdAt: Generated<string>;
+	updatedAt: Generated<string>;
+}
+
+export interface ImageAssetTable {
+	id: string;
+	/** Denormalized owner for direct file/asset authorization. */
+	userId: string;
+	workspaceId: string;
+	/** Selected source version; null for an initial upload or root prompt. */
+	sourceAssetId: string | null;
+	kind: ImageAssetKind;
+	filename: string;
+	mimeType: string;
+	byteSize: number;
+	sha256: string;
+	width: number | null;
+	height: number | null;
+	/** Generated server-side; never derived from a client path. */
+	storageKey: string;
+	createdAt: Generated<string>;
+}
+
+export interface ImageAttemptTable {
+	id: string;
+	/** Denormalized owner for direct status authorization. */
+	userId: string;
+	workspaceId: string;
+	sourceAssetId: string | null;
+	/** Non-null only when this is an explicit retry of an older attempt. */
+	retryOfAttemptId: string | null;
+	/** Client-generated key used to reconcile a retried request. */
+	requestKey: string;
+	prompt: string;
+	provider: string;
+	endpointId: string;
+	api: string;
+	modelId: string;
+	aspectRatio: string | null;
+	resolution: string | null;
+	status: ImageAttemptStatus;
+	errorMessage: string | null;
+	/** JSON-serialized pi-ai `Usage`, when the provider reports it. */
+	usageJson: string | null;
+	/** pi-ai usage.cost.total converted to integer USD micros. */
+	costMicros: number | null;
+	resultAssetId: string | null;
+	createdAt: Generated<string>;
+	startedAt: string | null;
+	finishedAt: string | null;
+}
+
 export interface Database {
 	apikey: Apikey;
 	app_meta: AppMetaTable;
@@ -289,6 +360,9 @@ export interface Database {
 	source_category: SourceCategoryTable;
 	skill: SkillTable;
 	impersonation_session: ImpersonationSessionTable;
+	image_workspace: ImageWorkspaceTable;
+	image_asset: ImageAssetTable;
+	image_attempt: ImageAttemptTable;
 	v2_conversation: V2ConversationTable;
 	v2_folder: V2FolderTable;
 	v2_tag: V2TagTable;

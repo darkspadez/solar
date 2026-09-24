@@ -4,12 +4,14 @@ const MOBILE_MEDIA_QUERY = "(max-width: 649px)";
 const RETURNED_AT_KEY = "solar:mobile-hidden-at";
 const INACTIVITY_THRESHOLD_MS = 5 * 60 * 1_000;
 
-export function useMobileReturnToNewChat(onReturn: () => void) {
+export function useMobileReturnToNewChat(onReturn: () => void, enabled = true) {
 	const onReturnRef = useRef(onReturn);
+	const enabledRef = useRef(enabled);
 
 	useEffect(() => {
 		onReturnRef.current = onReturn;
-	}, [onReturn]);
+		enabledRef.current = enabled;
+	}, [onReturn, enabled]);
 
 	useEffect(() => {
 		const isMobile = () => window.matchMedia(MOBILE_MEDIA_QUERY).matches;
@@ -19,6 +21,10 @@ export function useMobileReturnToNewChat(onReturn: () => void) {
 		};
 		const handleReturn = () => {
 			if (!isMobile()) return;
+			if (!enabledRef.current) {
+				sessionStorage.removeItem(RETURNED_AT_KEY);
+				return;
+			}
 			const hiddenAt = Number(sessionStorage.getItem(RETURNED_AT_KEY));
 			if (!hiddenAt) return;
 			sessionStorage.removeItem(RETURNED_AT_KEY);

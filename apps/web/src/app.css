@@ -166,6 +166,25 @@
 .solar-sidebar input, .solar-sidebar select { background: var(--color-base-100) !important; border-color: var(--color-base-300) !important; }
 .solar-sidebar input.solar-search-input { background: transparent !important; border: 0 !important; }
 .solar-main { min-width: 0; touch-action: pan-x pan-y; }
+.solar-image-workspace {
+  background:
+    radial-gradient(circle at 72% 0%, color-mix(in oklch, var(--color-accent) 12%, transparent), transparent 30rem),
+    var(--color-base-100);
+}
+.solar-image-stage {
+  background:
+    linear-gradient(135deg, color-mix(in oklch, var(--color-base-200) 74%, transparent), transparent),
+    color-mix(in oklch, var(--color-base-100) 94%, var(--color-primary));
+  box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--color-base-content) 6%, transparent);
+}
+.solar-image-checker {
+  background-color: color-mix(in oklch, var(--color-base-200) 78%, var(--color-base-100));
+}
+.solar-image-thumb { aspect-ratio: 1; }
+.solar-image-workspace select { background-color: var(--color-base-100); }
+@media (width < 48rem) {
+  .solar-image-workspace .solar-image-stage { min-height: 18rem; }
+}
 .solar-user-output, .solar-assistant-output { color: var(--color-base-content) !important; }
 .solar-user-output { background: color-mix(in oklch, var(--color-primary) 18%, var(--color-base-100)) !important; }
 .solar-action-btn, .solar-reasoning-toggle, .solar-attachment-remove { color: var(--color-base-content) !important; }

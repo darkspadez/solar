@@ -24,10 +24,13 @@ import {
 	getUserDefaultDisplayMode,
 	setUserDefaultDisplayMode,
 	importProviderModels,
+	listAvailableImageModels,
+	listImageCatalogModels,
 	listAvailableModels,
 	loadProviderConfigs,
 	parseAllowlist,
-	PROVIDER_APIS,
+	parseImageAllowlist,
+	ALL_PROVIDER_APIS,
 	resolveSelection,
 	resolveModel,
 	setAdminDefault,
@@ -75,6 +78,13 @@ import {
 	ChatV2ImportService,
 	ChatV2ImportValidationError,
 } from "../chat-v2/import";
+import {
+	ImageNotFoundError,
+	ImageWorkspaceBusyError,
+	ImageWorkspaceStartedError,
+} from "../images/repository";
+import { imageGenerationService } from "../images/service";
+import { ImageStorageError } from "../images/storage";
 
 const t = initTRPC.context<TrpcContext>().create();
 
@@ -763,6 +773,19 @@ const allowlistEntrySchema = z
 		reasoning: z.boolean().optional(),
 		vision: z.boolean().optional(),
 		documents: z.boolean().optional(),
+		image: z
+			.object({
+				input: z.boolean().default(true),
+				aspectRatios: z
+					.array(z.string().trim().min(1).max(32))
+					.max(32)
+					.default([]),
+				resolutions: z
+					.array(z.string().trim().min(1).max(32))
+					.max(32)
+					.default([]),
+			})
+			.optional(),
 		reasoningEffort: z
 			.enum(["minimal", "low", "medium", "high", "xhigh", "max"])
 			.optional(),
@@ -963,15 +986,20 @@ const adminRouter = router({
 				enabledModels: await Promise.all(
 					config.enabledModels.map(async (model) => ({
 						...model,
-						capabilities: await effectiveModelCapabilities({
-							provider: config.provider,
-							endpointId: model.endpointId,
-							modelId: model.id,
-							api: model.api,
-						}),
+						capabilities:
+							model.api === "openrouter-images"
+								? null
+								: await effectiveModelCapabilities({
+										provider: config.provider,
+										endpointId: model.endpointId,
+										modelId: model.id,
+										api: model.api,
+									}),
 					})),
 				),
-				apis: PROVIDER_APIS,
+				imageModels: config.imageModels,
+				imageCatalogModels: listImageCatalogModels(),
+				apis: ALL_PROVIDER_APIS,
 			})),
 		);
 	}),
@@ -986,10 +1014,11 @@ const adminRouter = router({
 						id: z.string().trim().min(1).max(100),
 						label: z.string().trim().min(1).max(100),
 						baseUrl: z.string().url().max(2000),
-						api: z.enum(PROVIDER_APIS as [string, ...string[]]),
+						api: z.enum(ALL_PROVIDER_APIS as unknown as [string, ...string[]]),
 					}),
 				),
 				enabledModels: z.array(allowlistEntrySchema),
+				imageModels: z.array(allowlistEntrySchema).optional(),
 			}),
 		)
 		.mutation(async ({ input }) => {
@@ -1011,10 +1040,40 @@ const adminRouter = router({
 					message: "each endpoint must use a different API",
 				});
 			}
-			for (const e of input.enabledModels) {
+			const legacyImageModels = input.enabledModels.filter(
+				(entry) => entry.image || entry.api === "openrouter-images",
+			);
+			const submittedImageModels = input.imageModels ?? legacyImageModels;
+			const submittedChatModels = input.enabledModels.filter(
+				(entry) => !entry.image && entry.api !== "openrouter-images",
+			);
+			const imageCatalogIds = new Set(
+				listImageCatalogModels().map((model) => model.id),
+			);
+			for (const e of [...submittedChatModels, ...submittedImageModels]) {
 				const endpoint = input.endpoints.find(
 					(candidate) => candidate.id === e.endpointId,
 				);
+				if (e.api === "openrouter-images") {
+					if (!e.image) {
+						throw new TRPCError({
+							code: "BAD_REQUEST",
+							message: "image models require image options",
+						});
+					}
+					if (!e.piModel || !imageCatalogIds.has(e.piModel)) {
+						throw new TRPCError({
+							code: "BAD_REQUEST",
+							message: `map image model "${e.id}" to a pi-ai image catalog model before saving`,
+						});
+					}
+				}
+				if (e.image && e.api !== "openrouter-images") {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message: "image options are only valid for OpenRouter image models",
+					});
+				}
 				if (!endpoint || endpoint.api !== e.api) {
 					throw new TRPCError({
 						code: "BAD_REQUEST",
@@ -1024,15 +1083,20 @@ const adminRouter = router({
 			}
 			const existing = await db
 				.selectFrom("provider_config")
-				.select("apiKey")
+				.select(["apiKey", "imageModels"])
 				.where("provider", "=", input.provider)
 				.executeTakeFirst();
+			const imageModels =
+				input.imageModels !== undefined || legacyImageModels.length > 0
+					? submittedImageModels
+					: parseImageAllowlist(existing?.imageModels);
 			const values = {
 				provider: input.provider,
 				apiKey: input.apiKey || existing?.apiKey || null,
 				baseUrl: null,
 				endpoints: JSON.stringify(input.endpoints),
-				enabledModels: JSON.stringify(input.enabledModels),
+				enabledModels: JSON.stringify(submittedChatModels),
+				imageModels: JSON.stringify(imageModels),
 				updatedAt: new Date().toISOString(),
 			};
 			await db
@@ -1044,6 +1108,7 @@ const adminRouter = router({
 						baseUrl: values.baseUrl,
 						endpoints: values.endpoints,
 						enabledModels: values.enabledModels,
+						imageModels: values.imageModels,
 						updatedAt: values.updatedAt,
 					}),
 				)
@@ -1086,7 +1151,9 @@ const adminRouter = router({
 					.array(
 						z.object({
 							id: z.string(),
-							api: z.enum(PROVIDER_APIS as [string, ...string[]]),
+							api: z.enum(
+								ALL_PROVIDER_APIS as unknown as [string, ...string[]],
+							),
 							visibility: z.enum(["public", "private"]),
 						}),
 					)
@@ -1321,6 +1388,7 @@ const adminRouter = router({
 				}
 			}
 			await deleteAttachmentFilesForUser(input.userId);
+			await imageGenerationService.deleteUserWorkspaces(input.userId);
 			sqlite.query("DELETE FROM user WHERE id = ?").run(input.userId);
 		}),
 
@@ -2099,6 +2167,230 @@ const tagRouter = router({
 		}),
 });
 
+function imageProcedureError(error: unknown): never {
+	if (error instanceof ImageNotFoundError)
+		throw new TRPCError({ code: "NOT_FOUND", message: error.message });
+	if (
+		error instanceof ImageWorkspaceBusyError ||
+		error instanceof ImageWorkspaceStartedError ||
+		error instanceof ImageStorageError
+	)
+		throw new TRPCError({ code: "BAD_REQUEST", message: error.message });
+	throw error;
+}
+
+function imageAssetUrl(workspaceId: string, assetId: string, download = false) {
+	return `/api/images/${encodeURIComponent(workspaceId)}/assets/${encodeURIComponent(assetId)}${download ? "/download" : ""}`;
+}
+
+function mapImageWorkspace(
+	data: Awaited<ReturnType<typeof imageGenerationService.getWorkspace>>,
+) {
+	const promptByAsset = new Map(
+		data.attempts
+			.filter((attempt) => attempt.resultAssetId)
+			.map((attempt) => [attempt.resultAssetId as string, attempt.prompt]),
+	);
+	const assets = data.assets.map((asset) => ({
+		id: asset.id,
+		url: imageAssetUrl(data.workspace.id, asset.id),
+		downloadUrl: imageAssetUrl(data.workspace.id, asset.id, true),
+		mimeType: asset.mimeType,
+		filename: asset.filename,
+		byteSize: asset.byteSize,
+		width: asset.width,
+		height: asset.height,
+		prompt: promptByAsset.get(asset.id) ?? null,
+		sourceVariantId: asset.sourceAssetId,
+		createdAt: asset.createdAt,
+	}));
+	const assetById = new Map(assets.map((asset) => [asset.id, asset]));
+	const attempts = data.attempts.map((attempt) => ({
+		id: attempt.id,
+		status: attempt.status,
+		prompt: attempt.prompt,
+		error: attempt.errorMessage,
+		errorMessage: attempt.errorMessage,
+		createdAt: attempt.createdAt,
+		finishedAt: attempt.finishedAt,
+		costMicros: attempt.costMicros,
+		resultAssetId: attempt.resultAssetId,
+		asset: attempt.resultAssetId
+			? (assetById.get(attempt.resultAssetId) ?? null)
+			: null,
+	}));
+	const activeAttempt = attempts.find((attempt) =>
+		["queued", "running"].includes(attempt.status),
+	);
+	return {
+		id: data.workspace.id,
+		title: data.workspace.title,
+		createdAt: data.workspace.createdAt,
+		updatedAt: data.workspace.updatedAt,
+		modelId: data.workspace.modelId,
+		aspectRatio: data.workspace.aspectRatio,
+		resolution: data.workspace.resolution,
+		assets,
+		variants: assets,
+		attempts,
+		activeAttempt: activeAttempt ?? null,
+		currentAssetId: data.currentAssetId,
+	};
+}
+
+const imageRouter = router({
+	list: protectedProcedure.query(async ({ ctx }) => {
+		const workspaces = await imageGenerationService.listWorkspaces(ctx.user.id);
+		return Promise.all(
+			workspaces.map(async (workspace) => {
+				const data = await imageGenerationService.getWorkspace(
+					ctx.user.id,
+					workspace.id,
+				);
+				const latest = data.assets.at(-1);
+				const active = data.activeAttempt;
+				return {
+					id: workspace.id,
+					title: workspace.title,
+					createdAt: workspace.createdAt,
+					updatedAt: workspace.updatedAt,
+					thumbnailUrl: latest ? imageAssetUrl(workspace.id, latest.id) : null,
+					status: active?.status ?? data.attempts[0]?.status ?? null,
+				};
+			}),
+		);
+	}),
+
+	get: protectedProcedure
+		.input(z.object({ workspaceId: z.string().uuid() }))
+		.query(async ({ ctx, input }) => {
+			try {
+				return mapImageWorkspace(
+					await imageGenerationService.getWorkspace(
+						ctx.user.id,
+						input.workspaceId,
+					),
+				);
+			} catch (error) {
+				return imageProcedureError(error);
+			}
+		}),
+
+	models: protectedProcedure.query(async ({ ctx }) =>
+		listAvailableImageModels(ctx.user.role === "admin"),
+	),
+
+	create: protectedProcedure
+		.input(z.object({ title: z.string().trim().max(200).optional() }))
+		.mutation(async ({ ctx, input }) =>
+			imageGenerationService.createWorkspace(ctx.user.id, input.title),
+		),
+
+	generate: protectedProcedure
+		.input(
+			z.object({
+				workspaceId: z.string().uuid(),
+				sourceAssetId: z.string().uuid().nullable().optional(),
+				prompt: z.string().trim().min(1).max(20_000),
+				modelId: z.string().trim().min(1).max(300),
+				provider: z.string().trim().max(100).optional(),
+				endpointId: z.string().trim().max(100).optional(),
+				api: z.string().trim().max(100).optional(),
+				aspectRatio: z.string().trim().min(1).max(32),
+				resolution: z.string().trim().min(1).max(32),
+				requestKey: z.string().uuid().optional(),
+			}),
+		)
+		.mutation(async ({ ctx, input }) => {
+			const models = await listAvailableImageModels(ctx.user.role === "admin");
+			const model = models.find(
+				(candidate) =>
+					candidate.modelId === input.modelId &&
+					(!input.provider || candidate.provider === input.provider) &&
+					(!input.endpointId || candidate.endpointId === input.endpointId) &&
+					(!input.api || candidate.api === input.api),
+			);
+			if (!model)
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Image model unavailable",
+				});
+			if (
+				model.aspectRatios.length > 0 &&
+				!model.aspectRatios.includes(input.aspectRatio)
+			)
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Aspect ratio unavailable",
+				});
+			if (
+				model.resolutions.length > 0 &&
+				!model.resolutions.includes(input.resolution)
+			)
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Resolution unavailable",
+				});
+			try {
+				const attempt = await imageGenerationService.startGeneration({
+					userId: ctx.user.id,
+					workspaceId: input.workspaceId,
+					sourceAssetId: input.sourceAssetId ?? null,
+					prompt: input.prompt,
+					modelId: model.modelId,
+					provider: model.provider,
+					endpointId: model.endpointId,
+					api: model.api,
+					aspectRatio: input.aspectRatio,
+					resolution: input.resolution,
+					requestKey: input.requestKey,
+				});
+				return {
+					id: attempt.id,
+					status: attempt.status,
+					prompt: attempt.prompt,
+					error: attempt.errorMessage,
+					createdAt: attempt.createdAt,
+				};
+			} catch (error) {
+				return imageProcedureError(error);
+			}
+		}),
+
+	retry: protectedProcedure
+		.input(z.object({ attemptId: z.string().uuid() }))
+		.mutation(async ({ ctx, input }) => {
+			try {
+				const attempt = await imageGenerationService.retry(
+					ctx.user.id,
+					input.attemptId,
+				);
+				return {
+					id: attempt.id,
+					status: attempt.status,
+					prompt: attempt.prompt,
+					error: attempt.errorMessage,
+					createdAt: attempt.createdAt,
+				};
+			} catch (error) {
+				return imageProcedureError(error);
+			}
+		}),
+
+	remove: protectedProcedure
+		.input(z.object({ workspaceId: z.string().uuid() }))
+		.mutation(async ({ ctx, input }) => {
+			try {
+				await imageGenerationService.deleteWorkspace(
+					ctx.user.id,
+					input.workspaceId,
+				);
+			} catch (error) {
+				return imageProcedureError(error);
+			}
+		}),
+});
+
 export const appRouter = router({
 	pasteSettings: protectedProcedure.query(() => getPasteSettings()),
 	sourceCategories: protectedProcedure
@@ -2141,6 +2433,7 @@ export const appRouter = router({
 	preset: presetRouter,
 	mcp: mcpRouter,
 	skill: skillRouter,
+	image: imageRouter,
 	admin: adminRouter,
 });
 

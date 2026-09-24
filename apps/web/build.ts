@@ -24,7 +24,7 @@ await cp("./public", outputDirectory, { recursive: true });
 
 await generateSW({
 	globDirectory: outputDirectory,
-	globPatterns: ["**/*.{html,js,css,woff2,png,webmanifest}"],
+	globPatterns: ["**/*.{html,ico,js,css,woff2,png,webmanifest}"],
 	globIgnores: ["sw.js", "workbox-*.js", "fonts/**"],
 	swDest: `${outputDirectory}/sw.js`,
 	cleanupOutdatedCaches: true,

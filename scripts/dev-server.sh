@@ -12,6 +12,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PIDFILE="$ROOT/.dev-server.pid"
 LOGFILE="$ROOT/.dev-server.log"
+PORTFILE="$ROOT/.dev-server.port"
 
 worktree_port() {
   if [ -x "$ROOT/scripts/port-allocator.sh" ]; then
@@ -28,7 +29,67 @@ worktree_port() {
   fi
 }
 
-SERVER_PORT="${PASEO_PORT:-${PORT:-$(worktree_port)}}"
+if [ "${1:-}" = "status" ] && [ -f "$PORTFILE" ]; then
+  SERVER_PORT="$(cat "$PORTFILE")"
+elif [ -n "${PORT:-}" ]; then
+  SERVER_PORT="$PORT"
+elif [ -f "$PORTFILE" ]; then
+  SERVER_PORT="$(cat "$PORTFILE")"
+else
+  SERVER_PORT="$(worktree_port)"
+fi
+
+run_server() {
+  local server_pid frpc_pid="" status
+
+  cleanup() {
+    if [ -n "$frpc_pid" ]; then
+      kill -TERM "$frpc_pid" 2>/dev/null || true
+    fi
+    if [ -n "${server_pid:-}" ]; then
+      kill -TERM "$server_pid" 2>/dev/null || true
+    fi
+    rm -f "$PORTFILE"
+  }
+
+  trap cleanup INT TERM HUP
+  trap cleanup EXIT
+
+  (
+    cd "$ROOT/apps/server"
+    exec env PORT="$SERVER_PORT" SOLAR_SEED_DEV_USER=1 bun --env-file=../../.env run dev
+  ) &
+  server_pid=$!
+
+  local ready=0
+  for _ in $(seq 1 60); do
+    if is_server_on_port; then
+      ready=1
+      break
+    fi
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      break
+    fi
+    sleep 0.5
+  done
+
+  if [ "$ready" -ne 1 ]; then
+    echo "dev server did not become ready on port $SERVER_PORT" >&2
+    wait "$server_pid" 2>/dev/null || true
+    return 1
+  fi
+
+  (cd "$ROOT" && exec env PORT="$SERVER_PORT" bun --env-file=.env scripts/run-frpc.ts) &
+  frpc_pid=$!
+
+  set +e
+  wait "$server_pid"
+  status=$?
+  set -e
+  cleanup
+  trap - EXIT INT TERM HUP
+  return "$status"
+}
 
 is_running() {
   [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null
@@ -64,17 +125,17 @@ case "${1:-}" in
       show_server_info
       exit 0
     fi
+    printf '%s\n' "$SERVER_PORT" > "$PORTFILE"
     if [ "${2:-}" = "--foreground" ]; then
       : > "$LOGFILE"
-      cd "$ROOT/apps/server"
       set +e
-      env PORT="$SERVER_PORT" SOLAR_SEED_DEV_USER=1 bun --env-file=../../.env run dev 2>&1 | tee "$LOGFILE"
+      (cd "$ROOT" && run_server) 2>&1 | tee "$LOGFILE"
       status="${PIPESTATUS[0]}"
       set -e
       exit "$status"
     fi
     : > "$LOGFILE"
-    PORT="$SERVER_PORT" SOLAR_SEED_DEV_USER=1 setsid bash -c 'cd "'"$ROOT"'/apps/server" && exec bun --env-file=../../.env run dev' \
+    PORT="$SERVER_PORT" SOLAR_SEED_DEV_USER=1 setsid bash -c 'cd "'"$ROOT"'" && exec bash scripts/dev-server.sh run' \
       >> "$LOGFILE" 2>&1 &
     echo $! > "$PIDFILE"
     # Give it a moment to bind or fail fast.
@@ -86,8 +147,14 @@ case "${1:-}" in
       echo "dev server failed to start; last log lines:"
       tail -n 20 "$LOGFILE"
       rm -f "$PIDFILE"
+      rm -f "$PORTFILE"
       exit 1
     fi
+    ;;
+
+  run)
+    cd "$ROOT"
+    run_server
     ;;
 
   stop)
@@ -95,6 +162,7 @@ case "${1:-}" in
       pid="$(cat "$PIDFILE")"
       kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
       rm -f "$PIDFILE"
+      rm -f "$PORTFILE"
       echo "dev server stopped"
     else
       echo "dev server not running"

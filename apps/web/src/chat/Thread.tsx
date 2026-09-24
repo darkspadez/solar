@@ -2,6 +2,7 @@ import {
 	ActionBarPrimitive,
 	AttachmentPrimitive,
 	ComposerPrimitive,
+	type Attachment,
 	MessagePrimitive,
 	ThreadPrimitive,
 	useComposerRuntime,
@@ -292,16 +293,21 @@ export function ContextStatusIndicator({ status }: { status?: ContextStatus }) {
 	return null;
 }
 
+/** Resolve an image preview from its local content or uploaded attachment. */
+export function getAttachmentImageSource(
+	attachment: Pick<Attachment, "id" | "type" | "content">,
+): string | undefined {
+	if (attachment.type !== "image") return undefined;
+	const imagePart = attachment.content?.find((part) => part.type === "image");
+	if (imagePart?.type === "image") return imagePart.image;
+	return attachment.id ? `/api/attachments/${attachment.id}` : undefined;
+}
+
 /** Small image-or-icon chip for a single attachment (composer or message). */
 function AttachmentChip({ removable }: { removable?: boolean }) {
 	const attachment = useAuiState((s) => s.attachment);
 	if (!attachment) return null;
-	const imagePart =
-		attachment.type === "image"
-			? (attachment.content?.[0] as
-					| { type: "image"; image: string }
-					| undefined)
-			: undefined;
+	const imageSource = getAttachmentImageSource(attachment);
 	const downloadHref =
 		!removable && attachment.id
 			? `/api/attachments/${attachment.id}`
@@ -309,9 +315,9 @@ function AttachmentChip({ removable }: { removable?: boolean }) {
 
 	const body = (
 		<>
-			{imagePart ? (
+			{imageSource ? (
 				<img
-					src={imagePart.image}
+					src={imageSource}
 					alt={attachment.name}
 					className="solar-attachment-thumb"
 				/>

@@ -135,6 +135,57 @@ export interface GenerationStep {
 	sequence: number;
 }
 
+export interface ImageAsset {
+	byteSize: number;
+	createdAt: Generated<string>;
+	filename: string;
+	height: number | null;
+	id: string | null;
+	kind: string;
+	mimeType: string;
+	sha256: string;
+	sourceAssetId: string | null;
+	storageKey: string;
+	userId: string;
+	width: number | null;
+	workspaceId: string;
+}
+
+export interface ImageAttempt {
+	aspectRatio: string | null;
+	costMicros: number | null;
+	createdAt: Generated<string>;
+	errorMessage: string | null;
+	finishedAt: string | null;
+	id: string | null;
+	modelId: string;
+	prompt: string;
+	provider: string;
+	endpointId: string;
+	api: string;
+	requestKey: string;
+	resolution: string | null;
+	resultAssetId: string | null;
+	retryOfAttemptId: string | null;
+	sourceAssetId: string | null;
+	startedAt: string | null;
+	status: string;
+	usageJson: string | null;
+	userId: string;
+	workspaceId: string;
+}
+
+export interface ImageWorkspace {
+	aspectRatio: string | null;
+	createdAt: Generated<string>;
+	id: string | null;
+	modelId: string | null;
+	resolution: string | null;
+	title: string;
+	updatedAt: Generated<string>;
+	userId: string;
+}
+
 export interface McpServer {
 	createdAt: string;
 	enabled: Generated<number>;
@@ -204,6 +255,7 @@ export interface ProviderConfig {
 	baseUrl: string | null;
 	enabledModels: Generated<string>;
 	endpoints: Generated<string>;
+	imageModels: Generated<string>;
 	provider: string | null;
 	updatedAt: Generated<string>;
 }
@@ -293,6 +345,9 @@ export interface DB {
 	conversation_tag: ConversationTag;
 	folder: Folder;
 	generation_step: GenerationStep;
+	image_asset: ImageAsset;
+	image_attempt: ImageAttempt;
+	image_workspace: ImageWorkspace;
 	mcp_server: McpServer;
 	message: Message;
 	preset: Preset;

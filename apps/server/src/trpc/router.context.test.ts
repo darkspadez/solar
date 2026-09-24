@@ -43,8 +43,15 @@ mock.module("../pi/migration", () => ({
 mock.module("../chat/catalog", () => ({
 	MOCK: true,
 	PROVIDER_APIS: ["openai-responses"],
+	ALL_PROVIDER_APIS: ["openai-responses", "openrouter-images"],
 	parseAllowlist: () => [],
+	parseImageAllowlist: () => [],
 	listAvailableModels: async () => [],
+	listAvailableImageModels: async () => [],
+	listImageCatalogModels: () => [],
+	resolveImageModel: async () => {
+		throw new Error("resolveImageModel should not be called in this test");
+	},
 	resolveSelection: async () => ({
 		provider: "mock",
 		endpointId: "mock",

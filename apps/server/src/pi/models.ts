@@ -153,6 +153,7 @@ export async function buildPiModelsJson(
 	for (const config of configs) {
 		for (const endpoint of config.endpoints) {
 			const models = config.enabledModels
+				.filter((entry) => !entry.image && entry.api !== "openrouter-images")
 				.filter((entry) => entry.endpointId === endpoint.id)
 				.map((entry) => endpointModelEntry(config, entry, builtins));
 			if (models.length === 0) continue;

@@ -7,6 +7,7 @@ interface ProviderConfig {
 	baseUrl: string | null;
 	endpoints?: { id: string; label: string; baseUrl: string; api: string }[];
 	enabledModels: AllowlistEntry[];
+	imageModels?: AllowlistEntry[];
 }
 
 const state = {
@@ -48,6 +49,7 @@ const db = {
 									...config,
 									endpoints: JSON.stringify(config.endpoints ?? []),
 									enabledModels: JSON.stringify(config.enabledModels),
+									imageModels: JSON.stringify(config.imageModels ?? []),
 								}))
 							: [],
 					where(column: string, _operator: string, value: string) {
@@ -67,6 +69,29 @@ const db = {
 										? undefined
 										: { value: metaValue };
 								}
+							},
+						};
+					},
+				};
+			},
+		};
+	},
+	updateTable(table: string) {
+		return {
+			set(values: Record<string, unknown>) {
+				return {
+					where(_column: string, _operator: string, provider: string) {
+						return {
+							execute: async () => {
+								if (table !== "provider_config") return;
+								const config = state.providerConfigs.find(
+									(candidate) => candidate.provider === provider,
+								);
+								if (!config) return;
+								if (typeof values.enabledModels === "string")
+									config.enabledModels = JSON.parse(values.enabledModels);
+								if (typeof values.imageModels === "string")
+									config.imageModels = JSON.parse(values.imageModels);
 							},
 						};
 					},
@@ -519,6 +544,97 @@ describe("catalog model policy", () => {
 		} finally {
 			globalThis.fetch = originalFetch;
 		}
+	});
+
+	test("imports a discovered model through a different configured API endpoint", async () => {
+		configureModels({
+			provider: "plexus",
+			apiKey: "test-key",
+			baseUrl: null,
+			endpoints: [
+				{
+					id: "responses",
+					label: "Responses",
+					baseUrl: "https://plexus.example/v1",
+					api: "openai-responses",
+				},
+				{
+					id: "gemini",
+					label: "Gemini",
+					baseUrl: "https://plexus.example",
+					api: "google-generative-ai",
+				},
+			],
+			enabledModels: [],
+		});
+		const originalFetch = globalThis.fetch;
+		globalThis.fetch = mock(
+			async () =>
+				new Response(
+					JSON.stringify({
+						data: [
+							{
+								id: "gemini-3.8-flash",
+								name: "Gemini 3.8 Flash",
+								architecture: { output_modalities: ["text"] },
+							},
+						],
+					}),
+				),
+		) as unknown as typeof fetch;
+		try {
+			await catalog.importProviderModels("plexus", "responses", [
+				{
+					id: "gemini-3.8-flash",
+					api: "google-generative-ai",
+					visibility: "public",
+				},
+			]);
+			expect(state.providerConfigs[0]?.enabledModels).toContainEqual(
+				expect.objectContaining({
+					id: "gemini-3.8-flash",
+					endpointId: "gemini",
+					api: "google-generative-ai",
+				}),
+			);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	test("requires an explicit pi-ai mapping for image models", async () => {
+		configureModels({
+			provider: "openrouter",
+			apiKey: "configured-key",
+			baseUrl: null,
+			endpoints: [
+				{
+					id: "images",
+					label: "OpenRouter Images",
+					baseUrl: "https://openrouter.ai/api/v1",
+					api: "openrouter-images",
+				},
+			],
+			enabledModels: [],
+			imageModels: [
+				{
+					id: "gemini-3.1-flash-lite-image",
+					endpointId: "images",
+					api: "openrouter-images",
+					visibility: "public",
+					name: "Nano Banana 2 Lite",
+					image: { input: true, aspectRatios: [], resolutions: [] },
+				},
+			],
+		});
+		expect(await catalog.listAvailableImageModels()).toHaveLength(0);
+
+		state.providerConfigs[0]!.imageModels![0]!.piProvider = "openrouter";
+		state.providerConfigs[0]!.imageModels![0]!.piModel =
+			"google/gemini-3.1-flash-lite-image";
+		expect(await catalog.listAvailableImageModels()).toContainEqual(
+			expect.objectContaining({ modelId: "gemini-3.1-flash-lite-image" }),
+		);
 	});
 
 	test("normalizes base URL for google-generative-ai endpoints", () => {

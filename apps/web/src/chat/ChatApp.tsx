@@ -28,6 +28,7 @@ import { McpServers } from "./McpServers";
 import { useSolarRuntime } from "./useSolarRuntime";
 import { useMobileReturnToNewChat } from "./useMobileReturnToNewChat";
 import { useNewChatHotkey } from "./useNewChatHotkey";
+import { ImageWorkspace } from "../images/ImageWorkspace";
 
 const SIDEBAR_DEFAULT_WIDTH = 280;
 const SIDEBAR_MIN_WIDTH = 220;
@@ -438,6 +439,19 @@ export function ChatApp() {
 		}),
 	);
 	const [activeId, setActiveId] = useState<string | undefined>();
+	const [activeImageId, setActiveImageId] = useState<string | undefined>(() => {
+		const imageId = new URLSearchParams(window.location.search).get("image");
+		return imageId ?? undefined;
+	});
+	useEffect(() => {
+		const syncImageLocation = () => {
+			const imageId = new URLSearchParams(window.location.search).get("image");
+			setActiveImageId(imageId ?? undefined);
+			if (imageId) setActiveId(undefined);
+		};
+		window.addEventListener("popstate", syncImageLocation);
+		return () => window.removeEventListener("popstate", syncImageLocation);
+	}, []);
 	// A freshly created conversation is a "draft" until its first turn: it isn't
 	// in the (message-filtered) list yet, but must stay selected.
 	const [draftId, setDraftId] = useState<string | undefined>();
@@ -499,11 +513,39 @@ export function ChatApp() {
 
 	const list = conversations.data ?? [];
 	const presetList = presets.data ?? [];
+	const imageMode = activeImageId !== undefined;
+
+	const setImageLocation = useCallback((imageId: string | undefined) => {
+		const url = new URL(window.location.href);
+		if (imageId) url.searchParams.set("image", imageId);
+		else url.searchParams.delete("image");
+		window.history.replaceState({}, "", url);
+	}, []);
+
+	const selectImage = useCallback(
+		(imageId: string) => {
+			setActiveImageId(imageId);
+			setActiveId(undefined);
+			setImageLocation(imageId);
+			setDrawerOpen(false);
+		},
+		[setImageLocation],
+	);
+
+	const newImage = useCallback(() => {
+		setActiveImageId("new");
+		setActiveId(undefined);
+		setImageLocation("new");
+	}, [setImageLocation]);
 
 	// Start a new conversation, optionally snapshotting a chosen preset.
 	const newChat = useCallback(
-		(presetId?: string) => create.mutate(presetId ? { presetId } : {}),
-		[create],
+		(presetId?: string) => {
+			setActiveImageId(undefined);
+			setImageLocation(undefined);
+			create.mutate(presetId ? { presetId } : {});
+		},
+		[create, setImageLocation],
 	);
 
 	// Collapse the pinned sidebar on desktop; on mobile just close the drawer.
@@ -515,13 +557,13 @@ export function ChatApp() {
 		}
 	}, []);
 
-	useMobileReturnToNewChat(newChat);
+	useMobileReturnToNewChat(newChat, !imageMode);
 	useNewChatHotkey(newChat);
 
 	// Ensure a conversation exists and one is always selected. The active draft
 	// is valid even though it isn't in the message-filtered list yet.
 	useEffect(() => {
-		if (!conversations.isSuccess) return;
+		if (imageMode || !conversations.isSuccess) return;
 		const activeIsValid =
 			!!activeId &&
 			(activeId === draftId || list.some((c) => c.id === activeId));
@@ -534,7 +576,14 @@ export function ChatApp() {
 			autoCreated.current = true;
 			create.mutate({});
 		}
-	}, [conversations.isSuccess, list, activeId, draftId, create.isPending]);
+	}, [
+		conversations.isSuccess,
+		list,
+		activeId,
+		draftId,
+		create.isPending,
+		imageMode,
+	]);
 
 	useEffect(() => {
 		if (!drawerOpen || window.matchMedia(PINNED_SIDEBAR_MEDIA_QUERY).matches)
@@ -626,6 +675,14 @@ export function ChatApp() {
 				}}
 			>
 				<header className="flex h-14 min-h-14 shrink-0 items-center gap-1 border-b border-base-300 bg-base-100 px-2 sm:px-4">
+					{imageMode && (
+						<div className="flex items-center gap-2 px-2 text-sm font-semibold">
+							<span className="grid h-7 w-7 place-items-center rounded-lg bg-primary/12 text-primary">
+								<Sparkles size={15} />
+							</span>
+							<span className="hidden sm:inline">Image studio</span>
+						</div>
+					)}
 					<label
 						htmlFor="solar-drawer"
 						className="solar-menu-toggle btn btn-ghost btn-sm btn-circle"
@@ -643,7 +700,7 @@ export function ChatApp() {
 							<PanelLeft size={19} />
 						</button>
 					)}
-					{activeId && <ModelMenu conversationId={activeId} />}
+					{!imageMode && activeId && <ModelMenu conversationId={activeId} />}
 					<div
 						className="tooltip tooltip-bottom"
 						data-tip="New chat (⌘/Ctrl+N)"
@@ -682,7 +739,19 @@ export function ChatApp() {
 					/>
 				)}
 				<div className="flex min-h-0 flex-1">
-					{activeId ? (
+					{imageMode ? (
+						<ImageWorkspace
+							workspaceId={activeImageId === "new" ? undefined : activeImageId}
+							onCreated={(id) => {
+								setActiveImageId(id);
+								setImageLocation(id);
+							}}
+							onDeleted={() => {
+								setActiveImageId(undefined);
+								setImageLocation(undefined);
+							}}
+						/>
+					) : activeId ? (
 						<ConversationView
 							key={activeId}
 							conversationId={activeId}
@@ -715,9 +784,17 @@ export function ChatApp() {
 				<Sidebar
 					activeId={activeId}
 					onSelect={(id) => {
+						setActiveImageId(undefined);
+						setImageLocation(undefined);
 						setActiveId(id);
 						setDrawerOpen(false);
 					}}
+					onNewImage={() => {
+						newImage();
+						setDrawerOpen(false);
+					}}
+					activeImageId={activeImageId}
+					onSelectImage={selectImage}
 					onToggleCollapse={toggleSidebar}
 					onNewChat={() => {
 						newChat();

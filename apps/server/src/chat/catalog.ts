@@ -2,6 +2,7 @@ import {
 	createProvider,
 	envApiKeyAuth,
 	type Api,
+	type ImagesModel,
 	type Model,
 	type Provider,
 } from "@earendil-works/pi-ai";
@@ -9,11 +10,16 @@ import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messag
 import { googleGenerativeAIApi } from "@earendil-works/pi-ai/api/google-generative-ai.lazy";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
-import { builtinModels } from "@earendil-works/pi-ai/providers/all";
+import {
+	builtinImagesModels,
+	builtinModels,
+} from "@earendil-works/pi-ai/providers/all";
 import { db } from "../db";
 import {
 	parseAllowlist,
+	parseImageAllowlist,
 	type AllowlistEntry,
+	type ImageModelOptions,
 	type ModelContextPolicy,
 	type ModelVisibility,
 } from "./allowlist";
@@ -26,7 +32,9 @@ import {
 
 export {
 	parseAllowlist,
+	parseImageAllowlist,
 	type AllowlistEntry,
+	type ImageModelOptions,
 	type ModelContextPolicy,
 	type ModelVisibility,
 } from "./allowlist";
@@ -60,6 +68,11 @@ const API_STREAMS = {
 };
 
 export const PROVIDER_APIS = Object.keys(API_STREAMS);
+export const PROVIDER_IMAGE_APIS = ["openrouter-images"] as const;
+export const ALL_PROVIDER_APIS = [
+	...PROVIDER_APIS,
+	...PROVIDER_IMAGE_APIS,
+] as const;
 
 const UPSTREAM_API_MAP: Record<string, string> = {
 	responses: "openai-responses",
@@ -73,6 +86,7 @@ const UPSTREAM_API_MAP: Record<string, string> = {
 };
 
 const piModels = builtinModels();
+const piImageModels = builtinImagesModels();
 
 export interface ProviderEndpoint {
 	id: string;
@@ -101,6 +115,7 @@ export interface ProviderConfigRow {
 	baseUrl: string | null;
 	endpoints: ProviderEndpoint[];
 	enabledModels: AllowlistEntry[];
+	imageModels: AllowlistEntry[];
 }
 
 export interface DiscoveredModel {
@@ -112,7 +127,42 @@ export interface DiscoveredModel {
 	piOptions?: Record<string, unknown>;
 	reasoning: boolean;
 	vision: boolean;
+	image?: ImageModelOptions;
 }
+
+export interface ImageModelDescriptor extends ModelSelection {
+	name: string;
+	input: ("text" | "image")[];
+	output: ("image" | "text")[];
+	aspectRatios: string[];
+	resolutions: string[];
+}
+
+export interface ImageCatalogModel {
+	id: string;
+	name: string;
+	input: ("text" | "image")[];
+	output: ("image" | "text")[];
+}
+
+export interface ResolvedImageModel {
+	model: ImagesModel<"openrouter-images">;
+	apiKey?: string;
+}
+
+const MOCK_IMAGE_MODELS: ImageModelDescriptor[] = [
+	{
+		provider: "mock",
+		endpointId: "mock",
+		modelId: "mock-image",
+		api: "openrouter-images",
+		name: "Mock image",
+		input: ["text", "image"],
+		output: ["image"],
+		aspectRatios: [],
+		resolutions: [],
+	},
+];
 
 const MOCK_MODELS: ModelDescriptor[] = [
 	{
@@ -151,7 +201,9 @@ function parseEndpoints(
 				typeof endpoint.label === "string" &&
 				typeof endpoint.baseUrl === "string" &&
 				typeof endpoint.api === "string" &&
-				PROVIDER_APIS.includes(endpoint.api)
+				ALL_PROVIDER_APIS.includes(
+					endpoint.api as (typeof ALL_PROVIDER_APIS)[number],
+				)
 					? [
 							{
 								id: endpoint.id,
@@ -178,16 +230,32 @@ function parseEndpoints(
 export async function loadProviderConfigs(): Promise<ProviderConfigRow[]> {
 	const rows = await db
 		.selectFrom("provider_config")
-		.select(["provider", "apiKey", "baseUrl", "endpoints", "enabledModels"])
+		.select([
+			"provider",
+			"apiKey",
+			"baseUrl",
+			"endpoints",
+			"enabledModels",
+			"imageModels",
+		])
 		.execute();
 	return rows.map((row) => {
 		const enabledModels = parseAllowlist(row.enabledModels);
+		const imageModels = parseImageAllowlist(row.imageModels ?? "[]");
+		const legacyImageModels = enabledModels.filter(
+			(entry) => entry.image || entry.api === "openrouter-images",
+		);
 		return {
 			provider: row.provider,
 			apiKey: row.apiKey,
 			baseUrl: row.baseUrl,
-			endpoints: parseEndpoints(row.endpoints, row.baseUrl, enabledModels),
+			endpoints: parseEndpoints(row.endpoints, row.baseUrl, [
+				...enabledModels,
+				...imageModels,
+				...legacyImageModels,
+			]),
 			enabledModels,
+			imageModels: imageModels.length ? imageModels : legacyImageModels,
 		};
 	});
 }
@@ -225,6 +293,7 @@ export async function listAvailableModels(
 	const configs = await loadProviderConfigs();
 	const available = configs.flatMap((config) =>
 		config.enabledModels
+			.filter((entry) => !entry.image && entry.api !== "openrouter-images")
 			.filter((entry) => entry.visibility === "public" || isAdmin)
 			.filter((entry) =>
 				config.endpoints.some(
@@ -236,6 +305,104 @@ export async function listAvailableModels(
 	);
 	if (MOCK) available.push(...MOCK_MODELS);
 	return available;
+}
+
+export function listImageCatalogModels(): ImageCatalogModel[] {
+	return piImageModels
+		.getModels("openrouter")
+		.filter((model) => model.output.includes("image"))
+		.map((model) => ({
+			id: model.id,
+			name: model.name,
+			input: [...model.input],
+			output: [...model.output],
+		}));
+}
+
+function imageModelFromEntry(
+	_provider: string,
+	entry: AllowlistEntry,
+): ImagesModel<"openrouter-images"> | undefined {
+	if (entry.api !== "openrouter-images" || !entry.piModel?.trim())
+		return undefined;
+	const known = piImageModels.getModel(
+		entry.piProvider ?? "openrouter",
+		entry.piModel as never,
+	);
+	if (!known || !known.output.includes("image")) return undefined;
+	return {
+		...known,
+		id: known.id,
+		name: entry.name ?? known.name,
+		...(entry.piOptions ?? {}),
+		...(entry.image?.input === false ? { input: ["text"] } : {}),
+	} as ImagesModel<"openrouter-images">;
+}
+
+export async function listAvailableImageModels(
+	isAdmin = false,
+): Promise<ImageModelDescriptor[]> {
+	const configs = await loadProviderConfigs();
+	const available = configs.flatMap((config) =>
+		config.imageModels.flatMap((entry) => {
+			if (entry.visibility !== "public" && !isAdmin) return [];
+			const model = imageModelFromEntry(config.provider, entry);
+			if (
+				!model ||
+				!config.endpoints.some(
+					(endpoint) =>
+						endpoint.id === entry.endpointId &&
+						endpoint.api === "openrouter-images",
+				)
+			)
+				return [];
+			return [
+				{
+					provider: config.provider,
+					endpointId: entry.endpointId,
+					modelId: entry.id,
+					api: entry.api,
+					name: model.name,
+					input: [...model.input],
+					output: [...model.output],
+					aspectRatios: entry.image?.aspectRatios ?? [],
+					resolutions: entry.image?.resolutions ?? [],
+				},
+			];
+		}),
+	);
+	if (MOCK) available.push(...MOCK_IMAGE_MODELS);
+	return available;
+}
+
+export async function resolveImageModel(
+	selection: ModelSelection,
+): Promise<ResolvedImageModel> {
+	const config = (await loadProviderConfigs()).find(
+		(candidate) => candidate.provider === selection.provider,
+	);
+	const entry = config?.imageModels.find(
+		(candidate) =>
+			candidate.id === selection.modelId &&
+			candidate.endpointId === selection.endpointId &&
+			candidate.api === selection.api,
+	);
+	const endpoint = config?.endpoints.find(
+		(candidate) =>
+			candidate.id === selection.endpointId &&
+			candidate.api === "openrouter-images",
+	);
+	if (!config || !entry || !endpoint || !entry.image)
+		throw new Error("Image model unavailable");
+	const model = imageModelFromEntry(config.provider, entry);
+	if (!model) throw new Error("Image model unavailable");
+	return {
+		model: {
+			...model,
+			baseUrl: normalizeBaseUrlForApi("openai-completions", endpoint.baseUrl),
+		},
+		apiKey: config.apiKey ?? undefined,
+	};
 }
 
 const ADMIN_DEFAULT_KEY = "default_model";
@@ -767,14 +934,14 @@ function upstreamApi(value: unknown) {
 	return typeof value === "string" ? (UPSTREAM_API_MAP[value] ?? null) : null;
 }
 
-function isTextGeneration(model: Record<string, unknown>) {
+function modelModalities(model: Record<string, unknown>) {
 	const architecture = model.architecture;
 	if (
 		!architecture ||
 		typeof architecture !== "object" ||
 		Array.isArray(architecture)
 	)
-		return true;
+		return { inputModalities: [], outputModalities: [] };
 	const input = (architecture as { input_modalities?: unknown })
 		.input_modalities;
 	const output = (architecture as { output_modalities?: unknown })
@@ -785,10 +952,20 @@ function isTextGeneration(model: Record<string, unknown>) {
 			: [];
 	const inputModalities = modalities(input);
 	const outputModalities = modalities(output);
+	return { inputModalities, outputModalities };
+}
+
+function isTextGeneration(model: Record<string, unknown>) {
+	const { inputModalities, outputModalities } = modelModalities(model);
 	return (
 		(!inputModalities.length || inputModalities.includes("text")) &&
 		(!outputModalities.length || outputModalities.includes("text"))
 	);
+}
+
+function isImageGeneration(model: Record<string, unknown>) {
+	const { inputModalities, outputModalities } = modelModalities(model);
+	return outputModalities.includes("image");
 }
 
 export async function discoverProviderModels(
@@ -816,12 +993,19 @@ export async function discoverProviderModels(
 	return payload.data.flatMap((item) => {
 		if (!item || typeof item !== "object" || Array.isArray(item)) return [];
 		const model = item as Record<string, unknown>;
-		if (typeof model.id !== "string" || !isTextGeneration(model)) return [];
-		const preferred = Array.isArray(model.preferred_api)
-			? (model.preferred_api
-					.map(upstreamApi)
-					.find((api): api is string => api !== null) ?? null)
-			: null;
+		const imageEndpoint = endpoint.api === "openrouter-images";
+		if (
+			typeof model.id !== "string" ||
+			(imageEndpoint ? !isImageGeneration(model) : !isTextGeneration(model))
+		)
+			return [];
+		const preferred = imageEndpoint
+			? "openrouter-images"
+			: Array.isArray(model.preferred_api)
+				? (model.preferred_api
+						.map(upstreamApi)
+						.find((api): api is string => api !== null) ?? null)
+				: null;
 		const architecture = model.architecture as
 			| { input_modalities?: unknown }
 			| undefined;
@@ -849,6 +1033,15 @@ export async function discoverProviderModels(
 					: {}),
 				reasoning: supported.includes("reasoning"),
 				vision: input.includes("image"),
+				...(imageEndpoint
+					? {
+							image: {
+								input: input.includes("image"),
+								aspectRatios: ["1:1", "4:3", "3:4", "16:9", "9:16"],
+								resolutions: ["1K", "2K", "4K"],
+							},
+						}
+					: {}),
 			},
 		];
 	});
@@ -882,18 +1075,48 @@ export async function importProviderModels(
 			...(model.piOptions ? { piOptions: model.piOptions } : {}),
 			reasoning: model.reasoning,
 			vision: model.vision,
+			...(selection.api === "openrouter-images"
+				? {
+						image: model.image ?? {
+							input: true,
+							aspectRatios: [],
+							resolutions: [],
+						},
+					}
+				: {}),
 		} satisfies AllowlistEntry;
 	});
+	const chatImports = imported.filter(
+		(entry) => entry.api !== "openrouter-images",
+	);
+	const imageImports = imported.filter(
+		(entry) => entry.api === "openrouter-images",
+	);
+	const imageCatalogIds = new Set(
+		listImageCatalogModels().map((model) => model.id),
+	);
+	const mappedImageImports = imageImports.map((entry) =>
+		entry.piModel || !imageCatalogIds.has(entry.id)
+			? entry
+			: { ...entry, piModel: entry.id },
+	);
 	const enabledModels = [
 		...config.enabledModels.filter(
-			(entry) => !imported.some((item) => item.id === entry.id),
+			(entry) => !chatImports.some((item) => item.id === entry.id),
 		),
-		...imported,
+		...chatImports,
+	];
+	const imageModels = [
+		...config.imageModels.filter(
+			(entry) => !mappedImageImports.some((item) => item.id === entry.id),
+		),
+		...mappedImageImports,
 	];
 	await db
 		.updateTable("provider_config")
 		.set({
 			enabledModels: JSON.stringify(enabledModels),
+			imageModels: JSON.stringify(imageModels),
 			updatedAt: new Date().toISOString(),
 		})
 		.where("provider", "=", provider)

@@ -3,6 +3,7 @@ import {
 	ChevronDown,
 	FileCode2,
 	FolderInput,
+	ImagePlus,
 	MoreHorizontal,
 	PanelLeftClose,
 	Pencil,
@@ -17,12 +18,16 @@ import {
 import { useState } from "react";
 import { useTRPC } from "../trpc";
 import { trpcClient } from "../trpcClient";
+import { getImageTrpc, type ImageWorkspaceSummary } from "../images/imageApi";
 
 interface SidebarProps {
 	activeId: string | undefined;
 	onSelect: (id: string) => void;
 	onToggleCollapse: () => void;
 	onNewChat: () => void;
+	onNewImage: () => void;
+	activeImageId: string | undefined;
+	onSelectImage: (id: string) => void;
 	presets: { id: string; name: string }[];
 	onNewWithPreset: (presetId: string) => void;
 	onManagePresets: () => void;
@@ -86,18 +91,23 @@ export function Sidebar({
 	onSelect,
 	onToggleCollapse,
 	onNewChat,
+	onNewImage,
+	activeImageId,
+	onSelectImage,
 	presets,
 	onNewWithPreset,
 	onManagePresets,
 	onManageSkills,
 }: SidebarProps) {
 	const trpc = useTRPC();
+	const imageTrpc = getImageTrpc(trpc);
 	const qc = useQueryClient();
 	const [search, setSearch] = useState("");
 	const [searchOpen, setSearchOpen] = useState(false);
 
 	const conversations = useQuery(trpc.conversation.list.queryOptions());
 	const folders = useQuery(trpc.folder.list.queryOptions());
+	const imageWorkspaces = useQuery(imageTrpc.list.queryOptions());
 	const searchResults = useQuery(
 		trpc.conversation.search.queryOptions(
 			{ query: search.trim() },
@@ -331,10 +341,19 @@ export function Sidebar({
 					<button
 						type="button"
 						onClick={onNewChat}
-						className="flex flex-1 items-center gap-2.5 rounded-lg px-2 py-2 text-sm font-medium hover:bg-base-300"
+						className="btn btn-ghost btn-sm flex-1 gap-1.5 rounded-lg px-2.5"
 					>
 						<SquarePen size={17} />
 						New Chat
+					</button>
+					<button
+						type="button"
+						onClick={onNewImage}
+						className="btn btn-ghost btn-sm ml-1 gap-1.5 rounded-lg px-2.5"
+						title="Create an image"
+					>
+						<ImagePlus size={16} />
+						<span className="hidden min-[420px]:inline">New Image</span>
 					</button>
 					<div className="dropdown dropdown-end">
 						<div
@@ -431,6 +450,45 @@ export function Sidebar({
 			</nav>
 
 			<div className="solar-scroll-overlay min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+				{!search.trim() && (imageWorkspaces.data?.length ?? 0) > 0 && (
+					<div className="mt-2">
+						<div className="px-2 py-1 text-xs font-semibold uppercase tracking-wide text-base-content/45">
+							Image workspaces
+						</div>
+						<div className="space-y-0.5">
+							{(imageWorkspaces.data as ImageWorkspaceSummary[]).map(
+								(workspace) => (
+									<button
+										key={workspace.id}
+										type="button"
+										onClick={() => onSelectImage(workspace.id)}
+										className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm ${
+											workspace.id === activeImageId
+												? "bg-primary/12 text-primary"
+												: "hover:bg-base-300/60"
+										}`}
+										title={workspace.title}
+									>
+										{workspace.thumbnailUrl ? (
+											<img
+												src={workspace.thumbnailUrl}
+												alt=""
+												className="h-7 w-7 shrink-0 rounded-md object-cover"
+											/>
+										) : (
+											<span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-primary/10 text-primary">
+												<ImagePlus size={14} />
+											</span>
+										)}
+										<span className="min-w-0 flex-1 truncate">
+											{workspace.title}
+										</span>
+									</button>
+								),
+							)}
+						</div>
+					</div>
+				)}
 				{search.trim() ? (
 					<div className="pt-1">
 						<div className="px-2 py-1 text-xs font-semibold uppercase tracking-wide text-base-content/45">

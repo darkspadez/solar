@@ -10,6 +10,12 @@ export interface ModelContextPolicy {
 	outputReserveTokens: number;
 }
 
+export interface ImageModelOptions {
+	input: boolean;
+	aspectRatios: string[];
+	resolutions: string[];
+}
+
 export interface AllowlistEntry {
 	id: string;
 	endpointId: string;
@@ -22,11 +28,38 @@ export interface AllowlistEntry {
 	reasoning?: boolean;
 	vision?: boolean;
 	documents?: boolean;
+	/** Image generation is deliberately separate from chat capabilities. */
+	image?: ImageModelOptions;
 	reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	verbosity?: "low" | "medium" | "high";
 	contextWindow?: number;
 	maxTokens?: number;
 	contextPolicy?: ModelContextPolicy;
+}
+
+function parseImageOptions(value: unknown): ImageModelOptions | undefined {
+	if (value === true) {
+		return { input: true, aspectRatios: [], resolutions: [] };
+	}
+	if (!value || typeof value !== "object" || Array.isArray(value)) return;
+	const options = value as Record<string, unknown>;
+	const aspectRatios = Array.isArray(options.aspectRatios)
+		? options.aspectRatios.filter(
+				(value): value is string =>
+					typeof value === "string" && value.length <= 32,
+			)
+		: [];
+	const resolutions = Array.isArray(options.resolutions)
+		? options.resolutions.filter(
+				(value): value is string =>
+					typeof value === "string" && value.length <= 32,
+			)
+		: [];
+	return {
+		input: options.input !== false,
+		aspectRatios: [...new Set(aspectRatios)],
+		resolutions: [...new Set(resolutions)],
+	};
 }
 
 function parseContextPolicy(value: unknown): ModelContextPolicy | undefined {
@@ -49,8 +82,11 @@ function parseContextPolicy(value: unknown): ModelContextPolicy | undefined {
 	return policy as unknown as ModelContextPolicy;
 }
 
-export function parseAllowlist(json: string): AllowlistEntry[] {
+export function parseAllowlist(
+	json: string | null | undefined,
+): AllowlistEntry[] {
 	try {
+		if (!json) return [];
 		const parsed = JSON.parse(json);
 		if (!Array.isArray(parsed)) return [];
 		return parsed.flatMap((entry) => {
@@ -62,6 +98,11 @@ export function parseAllowlist(json: string): AllowlistEntry[] {
 				return [];
 			}
 			const contextPolicy = parseContextPolicy(entry.contextPolicy);
+			const image = parseImageOptions(
+				entry.image ??
+					entry.imageCapabilities ??
+					(entry.api === "openrouter-images" ? { input: true } : undefined),
+			);
 			return [
 				{
 					id: entry.id,
@@ -90,6 +131,7 @@ export function parseAllowlist(json: string): AllowlistEntry[] {
 					...(typeof entry.documents === "boolean"
 						? { documents: entry.documents }
 						: {}),
+					...(image ? { image } : {}),
 					...(["minimal", "low", "medium", "high", "xhigh", "max"].includes(
 						entry.reasoningEffort,
 					)
@@ -118,4 +160,13 @@ export function parseAllowlist(json: string): AllowlistEntry[] {
 	} catch {
 		return [];
 	}
+}
+
+/** Parses the image-only catalog stored separately from chat models. */
+export function parseImageAllowlist(
+	json: string | null | undefined,
+): AllowlistEntry[] {
+	return parseAllowlist(json).filter(
+		(entry) => entry.api === "openrouter-images" || entry.image !== undefined,
+	);
 }
