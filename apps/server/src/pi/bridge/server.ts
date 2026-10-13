@@ -15,9 +15,10 @@ import {
 	documentInputCapabilities,
 	resolveSelection,
 } from "../../chat/catalog";
+import { nativeAttachmentAdapter } from "../../chat/nativeAttachmentAdapters";
 import type { ResolvedTool } from "../../chat/mcp";
 import { toolProvider } from "../../chat/tools";
-import { chatV2Repository } from "../../chat-v2/db/repository";
+import { conversationRepository } from "../../conversations/repository";
 import { logger } from "../../logger";
 import { MOCK } from "../../chat/catalog";
 import { serveMockChatCompletion } from "./mockLlm";
@@ -60,7 +61,7 @@ export function peekResolvedTools(
 }
 
 async function resolveConversationTools(identity: BridgeIdentity) {
-	const conversation = await chatV2Repository.getConversation(
+	const conversation = await conversationRepository.getConversation(
 		identity.userId,
 		identity.conversationId,
 	);
@@ -78,7 +79,7 @@ async function resolveConversationTools(identity: BridgeIdentity) {
 						toolCache.set(identity.conversationId, { at: Date.now(), tools });
 						return tools;
 					});
-	// Mirrors chat/v2Live.ts: without auto-execute, only read_skill is offered.
+	// Without auto-execute, only read_skill is offered.
 	return {
 		conversation,
 		tools: conversation.autoExecuteTools
@@ -121,21 +122,19 @@ piBridgeRoutes.post("/internal/pi-bridge/tools/execute", async (c) => {
 	}
 });
 
-piBridgeRoutes.get("/internal/pi-bridge/attachments", async (c) => {
-	const identity = authenticate(c.req.header("authorization"));
-	if (!identity) return c.json({ error: "unauthorized" }, 401);
-	const ids = (c.req.query("ids") ?? "").split(",").filter(Boolean);
-	if (ids.length === 0) return c.json({ partsById: {} });
-
-	const { conversation } = await resolveConversationTools(identity);
-	// Scope by attachment ownership (attachments are uploaded by the owning user
-	// before the message is sent; message bindings are only persisted by the
-	// engine AFTER the turn settles, so live expansion can't rely on them).
-	const wanted = new Set(ids);
+/**
+ * Scope by attachment ownership (attachments are uploaded by the owning user
+ * before the message is sent; message bindings are only persisted by the
+ * engine AFTER the turn settles, so live expansion can't rely on them).
+ */
+async function loadAttachmentRows(
+	userId: string,
+	ids: Iterable<string>,
+): Promise<AttachmentContentRow[]> {
 	const rows: AttachmentContentRow[] = [];
-	for (const id of wanted) {
-		const attachment = await chatV2Repository
-			.getAttachment(identity.userId, id)
+	for (const id of new Set(ids)) {
+		const attachment = await conversationRepository
+			.getAttachment(userId, id)
 			.catch(() => null);
 		if (!attachment) continue;
 		rows.push({
@@ -146,18 +145,38 @@ piBridgeRoutes.get("/internal/pi-bridge/attachments", async (c) => {
 			filename: attachment.filename,
 		});
 	}
-	if (rows.length === 0) return c.json({ partsById: {} });
+	return rows;
+}
 
-	const selection = await resolveSelection(
+async function conversationSelection(
+	conversation: Awaited<
+		ReturnType<typeof conversationRepository.getConversation>
+	>,
+	userId: string,
+) {
+	return resolveSelection(
 		{
 			provider: conversation.provider ?? undefined,
 			endpointId: conversation.endpointId ?? undefined,
 			modelId: conversation.modelId ?? undefined,
 			api: conversation.modelApi ?? undefined,
 		},
-		identity.userId,
+		userId,
 		false,
 	);
+}
+
+piBridgeRoutes.get("/internal/pi-bridge/attachments", async (c) => {
+	const identity = authenticate(c.req.header("authorization"));
+	if (!identity) return c.json({ error: "unauthorized" }, 401);
+	const ids = (c.req.query("ids") ?? "").split(",").filter(Boolean);
+	if (ids.length === 0) return c.json({ partsById: {} });
+
+	const { conversation } = await resolveConversationTools(identity);
+	const rows = await loadAttachmentRows(identity.userId, ids);
+	if (rows.length === 0) return c.json({ partsById: {} });
+
+	const selection = await conversationSelection(conversation, identity.userId);
 	const documentInput = await documentInputCapabilities(selection);
 	try {
 		const expanded = await expandAttachmentRows(rows, documentInput);
@@ -184,6 +203,52 @@ piBridgeRoutes.get("/internal/pi-bridge/attachments", async (c) => {
 		}
 		return c.json({ partsById });
 	}
+});
+
+const DOCUMENT_MARKER = /\[\[solar-document:([^\]]+)\]\]/g;
+
+const injectDocumentsBody = z.object({ payload: z.unknown() });
+
+/**
+ * Provider-payload half of native document input. The `context` hook expands
+ * a native-capable attachment to a `[[solar-document:<id>]]` placeholder text
+ * part; the document bytes can't ride in pi message content (pi-ai turns any
+ * non-text part into an image block). The extension's `before_provider_request`
+ * hook posts the final provider payload here, and the provider adapter swaps
+ * each placeholder for a real document block. Stateless: documents are
+ * re-resolved from the ids named by the placeholders.
+ */
+piBridgeRoutes.post("/internal/pi-bridge/inject-documents", async (c) => {
+	const identity = authenticate(c.req.header("authorization"));
+	if (!identity) return c.json({ error: "unauthorized" }, 401);
+	let payload: unknown;
+	try {
+		({ payload } = injectDocumentsBody.parse(await c.req.json()));
+	} catch {
+		return c.json({ error: "invalid request body" }, 400);
+	}
+
+	const ids = [...JSON.stringify(payload).matchAll(DOCUMENT_MARKER)].map(
+		(match) => match[1]!,
+	);
+	if (ids.length === 0) return c.json({ payload });
+
+	const conversation = await conversationRepository.getConversation(
+		identity.userId,
+		identity.conversationId,
+	);
+	const rows = await loadAttachmentRows(identity.userId, ids);
+	if (rows.length === 0) return c.json({ payload });
+
+	const selection = await conversationSelection(conversation, identity.userId);
+	const adapter = nativeAttachmentAdapter(selection);
+	if (!adapter) return c.json({ payload });
+	const { documents } = await expandAttachmentRows(
+		rows,
+		await documentInputCapabilities(selection),
+	);
+	if (documents.length === 0) return c.json({ payload });
+	return c.json({ payload: adapter.injectDocuments(payload, documents) });
 });
 
 // MOCK LLM: an OpenAI-compatible completions endpoint Solar serves to itself so

@@ -1,8 +1,10 @@
 import {
 	createProvider,
 	envApiKeyAuth,
+	normalizeContext,
 	type Api,
-	type ImagesModel,
+	type Context,
+	type ImageModel,
 	type Model,
 	type Provider,
 } from "@earendil-works/pi-ai";
@@ -10,10 +12,7 @@ import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messag
 import { googleGenerativeAIApi } from "@earendil-works/pi-ai/api/google-generative-ai.lazy";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
-import {
-	builtinImagesModels,
-	builtinModels,
-} from "@earendil-works/pi-ai/providers/all";
+import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { db } from "../db";
 import {
 	parseAllowlist,
@@ -86,7 +85,6 @@ const UPSTREAM_API_MAP: Record<string, string> = {
 };
 
 const piModels = builtinModels();
-const piImageModels = builtinImagesModels();
 
 export interface ProviderEndpoint {
 	id: string;
@@ -128,6 +126,8 @@ export interface DiscoveredModel {
 	reasoning: boolean;
 	vision: boolean;
 	image?: ImageModelOptions;
+	/** Advertised Responses service tiers (`service_tiers`); absent when unsupported. */
+	serviceTiers?: string[];
 }
 
 export interface ImageModelDescriptor extends ModelSelection {
@@ -146,7 +146,7 @@ export interface ImageCatalogModel {
 }
 
 export interface ResolvedImageModel {
-	model: ImagesModel<"openrouter-images">;
+	model: ImageModel<"openrouter-images">;
 	apiKey?: string;
 }
 
@@ -308,8 +308,8 @@ export async function listAvailableModels(
 }
 
 export function listImageCatalogModels(): ImageCatalogModel[] {
-	return piImageModels
-		.getModels("openrouter")
+	return piModels
+		.getModelsOfType("image", "openrouter")
 		.filter((model) => model.output.includes("image"))
 		.map((model) => ({
 			id: model.id,
@@ -322,12 +322,13 @@ export function listImageCatalogModels(): ImageCatalogModel[] {
 function imageModelFromEntry(
 	_provider: string,
 	entry: AllowlistEntry,
-): ImagesModel<"openrouter-images"> | undefined {
+): ImageModel<"openrouter-images"> | undefined {
 	if (entry.api !== "openrouter-images" || !entry.piModel?.trim())
 		return undefined;
-	const known = piImageModels.getModel(
+	const known = piModels.getModelOfType(
+		"image",
 		entry.piProvider ?? "openrouter",
-		entry.piModel as never,
+		entry.piModel,
 	);
 	if (!known || !known.output.includes("image")) return undefined;
 	return {
@@ -336,7 +337,7 @@ function imageModelFromEntry(
 		name: entry.name ?? known.name,
 		...(entry.piOptions ?? {}),
 		...(entry.image?.input === false ? { input: ["text"] } : {}),
-	} as ImagesModel<"openrouter-images">;
+	} as ImageModel<"openrouter-images">;
 }
 
 export async function listAvailableImageModels(
@@ -416,7 +417,6 @@ export const THINKING_LEVELS = [
 	"xhigh",
 	"max",
 ] as const;
-export const VERBOSITY_LEVELS = ["low", "medium", "high"] as const;
 
 export const DEFAULT_TITLE_PROMPT = `### Task: Generate a concise, 3-5 word title with an emoji summarizing the first user message.
 ### Guidelines:
@@ -692,9 +692,9 @@ export async function getModelCapabilities(selection: ModelSelection) {
 	if (selection.provider === "mock")
 		return {
 			reasoningLevels: [...THINKING_LEVELS],
-			supportsVerbosity: false,
+			serviceTiers: [],
 			defaultReasoningEffort: null,
-			defaultVerbosity: null,
+			defaultServiceTier: null,
 		};
 	const { model } = await resolveModel(selection);
 	const config = (await loadProviderConfigs()).find(
@@ -716,9 +716,9 @@ export async function getModelCapabilities(selection: ModelSelection) {
 		: [];
 	return {
 		reasoningLevels,
-		supportsVerbosity: selection.api === "openai-responses",
+		serviceTiers: entry?.serviceTiers ?? [],
 		defaultReasoningEffort: entry?.reasoningEffort ?? null,
-		defaultVerbosity: entry?.verbosity ?? null,
+		defaultServiceTier: entry?.serviceTier ?? null,
 		contextWindow: model.contextWindow,
 	};
 }
@@ -864,36 +864,28 @@ export interface GenerationParams {
 	systemPrompt?: string;
 	reasoningEffort?: string;
 	reasoningSummary?: boolean;
-	verbosity?: string;
 	documents?: NativeDocumentInput[];
 }
 
 export function streamModel(
 	resolved: ResolvedModel,
-	context: Parameters<Provider<Api>["stream"]>[1],
+	context: Context,
 	signal: AbortSignal,
 	params: GenerationParams = {},
 ) {
 	const apiKey = resolved.apiKey ? { apiKey: resolved.apiKey } : {};
 	const api = resolved.model.api;
+	const transcript = normalizeContext(context);
 	const wantSummary = params.reasoningSummary;
-	const wantVerbosity = params.verbosity && api === "openai-responses";
 	const onPayload =
-		wantSummary || wantVerbosity || params.documents?.length
+		wantSummary || params.documents?.length
 			? (payload: unknown) => {
 					const next = payload as Record<string, unknown>;
-					if (api === "openai-responses") {
-						if (wantSummary)
-							next.reasoning = {
-								...(next.reasoning as object),
-								summary: "auto",
-							};
-						if (wantVerbosity)
-							next.text = {
-								...(next.text as object),
-								verbosity: params.verbosity,
-							};
-					}
+					if (api === "openai-responses" && wantSummary)
+						next.reasoning = {
+							...(next.reasoning as object),
+							summary: "auto",
+						};
 					return params.documents?.length
 						? (nativeAttachmentAdapter({ api })?.injectDocuments(
 								next,
@@ -903,14 +895,14 @@ export function streamModel(
 				}
 			: undefined;
 	if (params.reasoningEffort) {
-		return resolved.runtimeProvider.streamSimple(resolved.model, context, {
+		return resolved.runtimeProvider.streamSimple(resolved.model, transcript, {
 			signal,
 			reasoning: params.reasoningEffort as never,
 			...(onPayload ? { onPayload } : {}),
 			...apiKey,
 		});
 	}
-	return resolved.runtimeProvider.stream(resolved.model, context, {
+	return resolved.runtimeProvider.stream(resolved.model, transcript, {
 		signal,
 		...(onPayload ? { onPayload } : {}),
 		...apiKey,
@@ -1015,6 +1007,22 @@ export async function discoverProviderModels(
 		const supported = Array.isArray(model.supported_parameters)
 			? model.supported_parameters
 			: [];
+		// Plexus advertises Responses service-tier support as a top-level
+		// `service_tiers` list. No key (or an empty one) means the model has
+		// no tier support — never assume it from the API type.
+		const serviceTiers = Array.isArray(model.service_tiers)
+			? [
+					...new Set(
+						model.service_tiers.flatMap((tier) =>
+							typeof tier === "string" &&
+							tier.trim().length > 0 &&
+							tier.trim().length <= 32
+								? [tier.trim()]
+								: [],
+						),
+					),
+				].slice(0, 16)
+			: [];
 		return [
 			{
 				id: model.id,
@@ -1033,6 +1041,7 @@ export async function discoverProviderModels(
 					: {}),
 				reasoning: supported.includes("reasoning"),
 				vision: input.includes("image"),
+				...(serviceTiers.length ? { serviceTiers } : {}),
 				...(imageEndpoint
 					? {
 							image: {
@@ -1075,6 +1084,7 @@ export async function importProviderModels(
 			...(model.piOptions ? { piOptions: model.piOptions } : {}),
 			reasoning: model.reasoning,
 			vision: model.vision,
+			...(model.serviceTiers ? { serviceTiers: model.serviceTiers } : {}),
 			...(selection.api === "openrouter-images"
 				? {
 						image: model.image ?? {
@@ -1104,7 +1114,19 @@ export async function importProviderModels(
 		...config.enabledModels.filter(
 			(entry) => !chatImports.some((item) => item.id === entry.id),
 		),
-		...chatImports,
+		// Refreshing discovery must not wipe the admin's chosen default tier:
+		// keep it when the newly advertised tiers still include it.
+		...chatImports.map((item) => {
+			const previous = config.enabledModels.find(
+				(entry) => entry.id === item.id,
+			);
+			const keepTier =
+				previous?.serviceTier &&
+				item.serviceTiers?.includes(previous.serviceTier)
+					? { serviceTier: previous.serviceTier }
+					: {};
+			return { ...item, ...keepTier };
+		}),
 	];
 	const imageModels = [
 		...config.imageModels.filter(
