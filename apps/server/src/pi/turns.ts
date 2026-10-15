@@ -121,6 +121,9 @@ function piVisibleTurns(conversationId: string): PiVisibleTurn[] {
 	for (const entry of path) {
 		if (entry.type !== "message") continue;
 		const role: string = entry.message.role;
+		// pi records the system prompt and tool loadout as empty-content system
+		// messages; they are model context, not part of the conversation.
+		if (role === "system") continue;
 		if (role === "user") {
 			turns.push({ id: entry.id, role: "user", entries: [entry] });
 		} else {
