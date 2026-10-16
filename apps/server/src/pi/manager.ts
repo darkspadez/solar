@@ -235,6 +235,11 @@ export class PiSessionManager {
 			}
 		).process;
 		childProcess?.once?.("exit", () => {
+			// A drop on purpose (respawn after a config change, idle reaping,
+			// shutdown) removes the handle before stopping the child. Its exit is
+			// expected and must not take down the conversation's replacement or
+			// interrupt the generation now running on it.
+			if (this.sessions.get(conversationId) !== session) return;
 			logger
 				.withMetadata({ conversationId })
 				.warn("pi process exited unexpectedly; dropping session handle");
