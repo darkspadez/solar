@@ -11,7 +11,7 @@ interface AllowlistEntry {
 	id: string;
 	endpointId: string;
 	api: string;
-	visibility: "public" | "private";
+	visibility: Visibility;
 	name?: string;
 	piProvider?: string;
 	piModel?: string;
@@ -93,10 +93,20 @@ function syncedAgo(iso: string, now = Date.now()): string {
 	return new Date(iso).toLocaleDateString();
 }
 
-/** "private" models are the ones only admins can pick. */
-function visibilityLabel(visibility: "public" | "private") {
-	return visibility === "public" ? "Public" : "Admin only";
-}
+type Visibility = "public" | "private" | "hidden";
+
+/** Who can pick a model, as the visibility selects offer it. */
+const VISIBILITY_OPTIONS: { value: Visibility; label: string }[] = [
+	{ value: "public", label: "Public — everyone" },
+	{ value: "private", label: "Private — admins only" },
+	{ value: "hidden", label: "Hidden — nobody" },
+];
+
+const VISIBILITY_BADGES: Record<Visibility, [string, string]> = {
+	public: ["Public", "badge-success badge-soft"],
+	private: ["Private", "badge-warning badge-soft"],
+	hidden: ["Hidden", "badge-neutral badge-soft"],
+};
 
 function ModelSyncStatusLine({ status }: { status: ModelSyncStatus | null }) {
 	if (!status)
@@ -406,24 +416,27 @@ function ModelSettingsModal({
 							))}
 						</select>
 					</fieldset>
-					<label className="flex items-center justify-between gap-4 rounded-box bg-base-200 px-4 py-3">
-						<span>
-							<span className="block font-medium">Admin only</span>
-							<span className="block text-sm opacity-60">
-								Only admins can select this model.
-							</span>
-						</span>
-						<input
-							className="toggle toggle-primary checked:border-primary checked:bg-primary checked:text-primary-content"
-							type="checkbox"
-							checked={model.visibility === "private"}
+					<fieldset className="fieldset">
+						<legend className="fieldset-legend">Who can pick it</legend>
+						<select
+							className="select w-full"
+							aria-label="Who can pick it"
+							value={model.visibility}
 							onChange={(event) =>
-								onChange({
-									visibility: event.target.checked ? "private" : "public",
-								})
+								onChange({ visibility: event.target.value as Visibility })
 							}
-						/>
-					</label>
+						>
+							{VISIBILITY_OPTIONS.map((option) => (
+								<option key={option.value} value={option.value}>
+									{option.label}
+								</option>
+							))}
+						</select>
+						<p className="label">
+							A hidden model stays in this list, so a model sync does not add it
+							back, but nobody can pick it.
+						</p>
+					</fieldset>
 					<label className="flex items-center justify-between gap-4 rounded-box bg-base-200 px-4 py-3">
 						<span>
 							<span className="block font-medium">Documents</span>
@@ -741,7 +754,7 @@ function ProviderCard({ initial }: { initial: ProviderForm }) {
 		}[];
 	} | null>(null);
 	const [imports, setImports] = useState<
-		Record<string, { api: string; visibility: "public" | "private" }>
+		Record<string, { api: string; visibility: Visibility }>
 	>({});
 	const [settingsIndex, setSettingsIndex] = useState<number | null>(null);
 	// The provider version this form edits; a save from an older version is
@@ -925,7 +938,7 @@ function ProviderCard({ initial }: { initial: ProviderForm }) {
 						</label>
 						<button
 							type="button"
-							className="btn btn-sm"
+							className="btn btn-sm btn-primary btn-outline"
 							disabled={
 								!syncAvailable ||
 								hasChanges ||
@@ -937,7 +950,7 @@ function ProviderCard({ initial }: { initial: ProviderForm }) {
 									? "Model sync is off in airgap mode"
 									: hasChanges
 										? "Save or discard your changes first"
-										: "Add new gateway models (admin only), refresh what the gateway reports, and remove models it no longer lists"
+										: "Add new gateway models (as private), refresh what the gateway reports, and remove models it no longer lists"
 							}
 							onClick={() => syncModels.mutate({ provider: initial.provider })}
 						>
@@ -1147,15 +1160,14 @@ function ProviderCard({ initial }: { initial: ProviderForm }) {
 																...current,
 																[model.id]: {
 																	api: current[model.id]?.api ?? preferredApi,
-																	visibility: event.target.value as
-																		| "public"
-																		| "private",
+																	visibility: event.target.value as Visibility,
 																},
 															}))
 														}
 													>
 														<option value="public">Public</option>
-														<option value="private">Admin only</option>
+														<option value="private">Private</option>
+														<option value="hidden">Hidden</option>
 													</select>
 												</td>
 											</tr>
@@ -1203,9 +1215,9 @@ function ProviderCard({ initial }: { initial: ProviderForm }) {
 								</div>
 								<div className="hidden items-center gap-1.5 text-xs sm:flex">
 									<span
-										className={`badge badge-sm ${model.visibility === "public" ? "badge-success badge-soft" : "badge-warning badge-soft"}`}
+										className={`badge badge-sm ${VISIBILITY_BADGES[model.visibility][1]}`}
 									>
-										{visibilityLabel(model.visibility)}
+										{VISIBILITY_BADGES[model.visibility][0]}
 									</span>
 									{model.documents && (
 										<span className="badge badge-sm badge-outline">

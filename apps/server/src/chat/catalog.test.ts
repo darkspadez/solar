@@ -194,7 +194,7 @@ describe("catalog model policy", () => {
 		});
 	});
 
-	test("shows private models only to admins and conservatively describes unknown models", async () => {
+	test("shows private models only to admins, hidden models to nobody, and conservatively describes unknown models", async () => {
 		configureModels({
 			provider: "openai",
 			apiKey: null,
@@ -211,6 +211,12 @@ describe("catalog model policy", () => {
 					endpointId: "openai-completions",
 					api: "openai-completions",
 					visibility: "private",
+				},
+				{
+					id: "hidden-openai",
+					endpointId: "openai-completions",
+					api: "openai-completions",
+					visibility: "hidden",
 				},
 			],
 		});
