@@ -94,6 +94,45 @@ describe("loadPiMessages compaction marker", () => {
 	});
 });
 
+describe("loadPiMessages system prompt entries", () => {
+	test("pi's system prompt messages are not shown as assistant turns", async () => {
+		const conv = "conv-system-prompt";
+		const sessionDir = piSessionDir(conv);
+		mkdirSync(sessionDir, { recursive: true });
+		const cwdDir = join(dir, "cwd", conv);
+		mkdirSync(cwdDir, { recursive: true });
+		const manager = SessionManager.create(cwdDir, sessionDir);
+		// pi records the prompt sections and tool loadout as an empty-content
+		// system message before the first prompt and whenever either changes.
+		const systemMsg = (preamble: string) =>
+			({
+				role: "system",
+				content: "",
+				sections: { preamble },
+				timestamp: Date.now(),
+			}) as unknown as MessageParam;
+		manager.appendMessage(systemMsg("You are a helpful assistant."));
+		const u1 = manager.appendMessage(userMsg("test"));
+		const a1 = manager.appendMessage(assistantMsg("Hi!"));
+		manager.appendMessage(systemMsg("You are a terse assistant."));
+		manager.appendMessage(userMsg("again"));
+		manager.appendMessage(assistantMsg("Hi again."));
+
+		const rows = await loadPiMessages("user-1", conv);
+		expect(rows.map((row) => [row.role, row.text])).toEqual([
+			["user", "test"],
+			["assistant", "Hi!"],
+			["user", "again"],
+			["assistant", "Hi again."],
+		]);
+		expect(rows[0]!.id).toBe(u1);
+		// The assistant row's parts (and metrics) come from its own entry, not
+		// from the system message pi appended after it.
+		expect(JSON.parse(rows[1]!.parts).role).toBe("assistant");
+		expect(rows[1]!.id).toBe(a1);
+	});
+});
+
 describe("loadPiMessages stall errors", () => {
 	test("shows Solar's stall reason, not pi's 'Request was aborted'", async () => {
 		const conv = "conv-stall-reload";
