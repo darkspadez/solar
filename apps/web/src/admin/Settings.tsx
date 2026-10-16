@@ -93,6 +93,11 @@ function syncedAgo(iso: string, now = Date.now()): string {
 	return new Date(iso).toLocaleDateString();
 }
 
+/** "private" models are the ones only admins can pick. */
+function visibilityLabel(visibility: "public" | "private") {
+	return visibility === "public" ? "Public" : "Admin only";
+}
+
 function ModelSyncStatusLine({ status }: { status: ModelSyncStatus | null }) {
 	if (!status)
 		return <span className="text-sm opacity-70">Not synced yet</span>;
@@ -403,18 +408,18 @@ function ModelSettingsModal({
 					</fieldset>
 					<label className="flex items-center justify-between gap-4 rounded-box bg-base-200 px-4 py-3">
 						<span>
-							<span className="block font-medium">Visible to all users</span>
+							<span className="block font-medium">Admin only</span>
 							<span className="block text-sm opacity-60">
-								Allow non-admin users to select this model.
+								Only admins can select this model.
 							</span>
 						</span>
 						<input
 							className="toggle toggle-primary checked:border-primary checked:bg-primary checked:text-primary-content"
 							type="checkbox"
-							checked={model.visibility === "public"}
+							checked={model.visibility === "private"}
 							onChange={(event) =>
 								onChange({
-									visibility: event.target.checked ? "public" : "private",
+									visibility: event.target.checked ? "private" : "public",
 								})
 							}
 						/>
@@ -901,42 +906,45 @@ function ProviderCard({ initial }: { initial: ProviderForm }) {
 		<section className="card card-border bg-base-100 shadow-sm">
 			<div className="card-body gap-4 p-4 sm:p-5">
 				<h3 className="card-title capitalize">{initial.provider}</h3>
-				<div className="flex min-w-0 flex-wrap items-start gap-x-4 gap-y-2">
-					<label className="label cursor-pointer gap-2 text-sm">
-						<input
-							type="checkbox"
-							className="toggle toggle-sm"
-							checked={initial.autoSyncModels ?? false}
-							disabled={!syncAvailable || setAutoSync.isPending}
-							onChange={(event) =>
-								setAutoSync.mutate({
-									provider: initial.provider,
-									enabled: event.target.checked,
-								})
+				<div className="grid min-w-0 gap-2 rounded-box bg-base-200 px-4 py-3">
+					<div className="flex flex-wrap items-center justify-between gap-3">
+						<label className="flex cursor-pointer items-center gap-2 text-sm font-medium">
+							<input
+								type="checkbox"
+								className="toggle toggle-sm toggle-primary"
+								checked={initial.autoSyncModels ?? false}
+								disabled={!syncAvailable || setAutoSync.isPending}
+								onChange={(event) =>
+									setAutoSync.mutate({
+										provider: initial.provider,
+										enabled: event.target.checked,
+									})
+								}
+							/>
+							Auto-sync models
+						</label>
+						<button
+							type="button"
+							className="btn btn-sm"
+							disabled={
+								!syncAvailable ||
+								hasChanges ||
+								syncing ||
+								endpoints.length === 0
 							}
-						/>
-						Auto-sync models
-					</label>
-					<button
-						type="button"
-						className="btn btn-sm"
-						disabled={
-							!syncAvailable || hasChanges || syncing || endpoints.length === 0
-						}
-						title={
-							!syncAvailable
-								? "Model sync is off in airgap mode"
-								: hasChanges
-									? "Save or discard your changes first"
-									: "Add new gateway models (as private), refresh what the gateway reports, and remove models it no longer lists"
-						}
-						onClick={() => syncModels.mutate({ provider: initial.provider })}
-					>
-						{syncing ? "Syncing…" : "Sync models"}
-					</button>
-					<div className="min-w-0 basis-full sm:basis-auto sm:flex-1">
-						<ModelSyncStatusLine status={initial.modelSync ?? null} />
+							title={
+								!syncAvailable
+									? "Model sync is off in airgap mode"
+									: hasChanges
+										? "Save or discard your changes first"
+										: "Add new gateway models (admin only), refresh what the gateway reports, and remove models it no longer lists"
+							}
+							onClick={() => syncModels.mutate({ provider: initial.provider })}
+						>
+							{syncing ? "Syncing…" : "Sync models"}
+						</button>
 					</div>
+					<ModelSyncStatusLine status={initial.modelSync ?? null} />
 				</div>
 				{serverChanged && (
 					<div
@@ -1147,7 +1155,7 @@ function ProviderCard({ initial }: { initial: ProviderForm }) {
 														}
 													>
 														<option value="public">Public</option>
-														<option value="private">Private</option>
+														<option value="private">Admin only</option>
 													</select>
 												</td>
 											</tr>
@@ -1197,7 +1205,7 @@ function ProviderCard({ initial }: { initial: ProviderForm }) {
 									<span
 										className={`badge badge-sm ${model.visibility === "public" ? "badge-success badge-soft" : "badge-warning badge-soft"}`}
 									>
-										{model.visibility}
+										{visibilityLabel(model.visibility)}
 									</span>
 									{model.documents && (
 										<span className="badge badge-sm badge-outline">
