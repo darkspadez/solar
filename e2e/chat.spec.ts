@@ -141,6 +141,12 @@ test("shows compact provider model rows with per-model settings", async ({
 		await expect(
 			modelSettings.getByRole("combobox", { name: /Who can pick it/ }),
 		).toHaveValue("public");
+		// Long help text wraps instead of widening the dialog sideways.
+		expect(
+			await modelSettings.evaluate(
+				(element) => element.scrollWidth <= element.clientWidth,
+			),
+		).toBe(true);
 		await expect(
 			modelSettings.getByRole("checkbox", { name: /Documents/ }),
 		).toBeChecked();

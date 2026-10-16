@@ -105,7 +105,7 @@ const VISIBILITY_OPTIONS: { value: Visibility; label: string }[] = [
 const VISIBILITY_BADGES: Record<Visibility, [string, string]> = {
 	public: ["Public", "badge-success badge-soft"],
 	private: ["Private", "badge-warning badge-soft"],
-	hidden: ["Hidden", "badge-neutral badge-soft"],
+	hidden: ["Hidden", "badge-error badge-soft"],
 };
 
 function ModelSyncStatusLine({ status }: { status: ModelSyncStatus | null }) {
@@ -432,7 +432,7 @@ function ModelSettingsModal({
 								</option>
 							))}
 						</select>
-						<p className="label">
+						<p className="label whitespace-normal">
 							A hidden model stays in this list, so a model sync does not add it
 							back, but nobody can pick it.
 						</p>
