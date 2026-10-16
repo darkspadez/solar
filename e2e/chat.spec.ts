@@ -123,6 +123,10 @@ test("shows compact provider model rows with per-model settings", async ({
 			.getByRole("group", { name: "Imported models" })
 			.locator("li");
 		await expect(rows).toHaveCount(2);
+		// The badges are hidden on narrow screens: check the text is there.
+		await expect(rows.first().getByText("Public", { exact: true })).toHaveCount(
+			1,
+		);
 		for (const row of await rows.all()) {
 			expect((await row.boundingBox())!.height).toBeLessThanOrEqual(72);
 		}
@@ -135,8 +139,8 @@ test("shows compact provider model rows with per-model settings", async ({
 			"openai-responses",
 		);
 		await expect(
-			modelSettings.getByRole("checkbox", { name: /Visible to all users/ }),
-		).toBeChecked();
+			modelSettings.getByRole("checkbox", { name: /Admin only/ }),
+		).not.toBeChecked();
 		await expect(
 			modelSettings.getByRole("checkbox", { name: /Documents/ }),
 		).toBeChecked();
@@ -253,6 +257,22 @@ test("syncs a provider's models with its gateway and shows the outcome", async (
 		await expect(page.getByText(/Images: Model query failed/)).toBeVisible();
 		const autoSync = page.getByRole("checkbox", { name: "Auto-sync models" });
 		await expect(autoSync).not.toBeChecked();
+		// The switch and the button sit on one line, centred on each other,
+		// with the sync status underneath.
+		const syncButton = page.getByRole("button", { name: "Sync models" });
+		const switchBox = (await autoSync.boundingBox())!;
+		const buttonBox = (await syncButton.boundingBox())!;
+		const statusBox = (await page
+			.getByText(/Last synced 12 min ago/)
+			.boundingBox())!;
+		expect(
+			Math.abs(
+				switchBox.y +
+					switchBox.height / 2 -
+					(buttonBox.y + buttonBox.height / 2),
+			),
+		).toBeLessThanOrEqual(2);
+		expect(statusBox.y).toBeGreaterThanOrEqual(buttonBox.y + buttonBox.height);
 		await autoSync.click();
 		await page.getByRole("button", { name: "Sync models" }).click();
 		await expect.poll(() => calls).toEqual(["auto-sync", "sync"]);
