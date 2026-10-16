@@ -163,6 +163,108 @@ test("shows compact provider model rows with per-model settings", async ({
 	}
 });
 
+test("syncs a provider's models with its gateway and shows the outcome", async ({
+	browser,
+	baseURL,
+}) => {
+	for (const options of [
+		{ ...devices["iPhone 13"], baseURL },
+		{ baseURL, viewport: { width: 1024, height: 768 } },
+	]) {
+		const context = await browser.newContext(options);
+		const page = await context.newPage();
+		const syncedAt = new Date(Date.now() - 12 * 60_000).toISOString();
+		const provider = {
+			provider: "plexus",
+			hasApiKey: true,
+			updatedAt: syncedAt,
+			autoSyncModels: false,
+			syncing: false,
+			syncAvailable: true,
+			modelSync: {
+				at: syncedAt,
+				trigger: "timer",
+				ok: false,
+				added: ["new-a", "new-b"],
+				removed: ["old-x"],
+				updated: [{ id: "gpt-5.6-luna", fields: ["vision"] }],
+				moved: [],
+				skipped: [],
+				errors: ["Images: Model query failed (502 Bad Gateway)"],
+				missing: {},
+				missingImages: {},
+			},
+			endpoints: [
+				{
+					id: "openai-responses",
+					label: "Responses",
+					baseUrl: "https://plexus.example/v1",
+					api: "openai-responses",
+				},
+			],
+			enabledModels: [
+				{
+					id: "gpt-5.6-luna",
+					endpointId: "openai-responses",
+					api: "openai-responses",
+					visibility: "public",
+				},
+			],
+			apis: ["openai-responses", "openai-completions"],
+		};
+		await page.route("**/trpc/*admin.listProviders*", async (route) => {
+			const response = await route.fetch();
+			const body = await response.json();
+			const procedures =
+				new URL(route.request().url()).pathname.split("/").at(-1)?.split(",") ??
+				[];
+			body[procedures.indexOf("admin.listProviders")].result.data = [provider];
+			await route.fulfill({ response, json: body });
+		});
+		const calls: string[] = [];
+		await page.route("**/trpc/admin.syncProviderModels*", async (route) => {
+			calls.push("sync");
+			await route.fulfill({
+				json: [
+					{ result: { data: { ...provider.modelSync, ok: true, errors: [] } } },
+				],
+			});
+		});
+		await page.route("**/trpc/admin.setProviderAutoSync*", async (route) => {
+			calls.push("auto-sync");
+			await route.fulfill({
+				json: [
+					{
+						result: {
+							data: { autoSyncModels: true, status: null, skipped: null },
+						},
+					},
+				],
+			});
+		});
+		await signIn(page);
+		await openSettings(page);
+		await page.getByRole("tab", { name: "Providers" }).click();
+
+		await expect(page.getByText(/Last synced 12 min ago/)).toBeVisible();
+		await expect(
+			page.getByText("+2 added · −1 removed · 1 updated"),
+		).toBeVisible();
+		await expect(page.getByText(/Images: Model query failed/)).toBeVisible();
+		const autoSync = page.getByRole("checkbox", { name: "Auto-sync models" });
+		await expect(autoSync).not.toBeChecked();
+		await autoSync.click();
+		await page.getByRole("button", { name: "Sync models" }).click();
+		await expect.poll(() => calls).toEqual(["auto-sync", "sync"]);
+		expect(
+			await page.evaluate(() => document.documentElement.scrollWidth),
+		).toBeLessThanOrEqual(
+			await page.evaluate(() => document.documentElement.clientWidth),
+		);
+		await context.close();
+	}
+});
+
 test("deletes a provider from settings", async ({ page }) => {
 	await signIn(page);
 

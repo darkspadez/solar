@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Settings2, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSession } from "../auth";
 import { useTRPC } from "../trpc";
 import { newId } from "../id";
@@ -55,6 +55,18 @@ interface ImageCatalogModel {
 	output: ("image" | "text")[];
 }
 
+interface ModelSyncStatus {
+	at: string;
+	trigger: "manual" | "timer" | "enable";
+	ok: boolean;
+	added: string[];
+	removed: string[];
+	updated: { id: string; fields: string[] }[];
+	moved: { id: string; from: string; to: string }[];
+	skipped: string[];
+	errors: string[];
+}
+
 interface ProviderForm {
 	provider: string;
 	hasApiKey: boolean;
@@ -63,6 +75,79 @@ interface ProviderForm {
 	imageModels?: AllowlistEntry[];
 	imageCatalogModels?: ImageCatalogModel[];
 	apis: readonly string[];
+	/** Provider version the form was loaded from (sent back on save). */
+	updatedAt?: string | null;
+	autoSyncModels?: boolean;
+	modelSync?: ModelSyncStatus | null;
+	syncing?: boolean;
+	syncAvailable?: boolean;
+}
+
+function syncedAgo(iso: string, now = Date.now()): string {
+	const minutes = Math.floor((now - new Date(iso).getTime()) / 60_000);
+	if (!Number.isFinite(minutes)) return "";
+	if (minutes < 1) return "just now";
+	if (minutes < 60) return `${minutes} min ago`;
+	if (minutes < 24 * 60) return `${Math.floor(minutes / 60)} h ago`;
+	return new Date(iso).toLocaleDateString();
+}
+
+function ModelSyncStatusLine({ status }: { status: ModelSyncStatus | null }) {
+	if (!status)
+		return <span className="text-sm opacity-70">Not synced yet</span>;
+	const counts = [
+		status.added.length ? `+${status.added.length} added` : "",
+		status.removed.length ? `−${status.removed.length} removed` : "",
+		status.updated.length ? `${status.updated.length} updated` : "",
+		status.moved.length ? `${status.moved.length} moved` : "",
+	].filter(Boolean);
+	const details = [
+		["Added", status.added],
+		["Removed", status.removed],
+		[
+			"Updated",
+			status.updated.map((item) => `${item.id} (${item.fields.join(", ")})`),
+		],
+		[
+			"Moved",
+			status.moved.map((item) => `${item.id}: ${item.from} → ${item.to}`),
+		],
+		["Not added (no image mapping)", status.skipped],
+	] as const;
+	return (
+		<div className="grid min-w-0 gap-1 text-sm">
+			<span className="opacity-70">
+				Last synced {syncedAgo(status.at)}
+				{status.trigger === "timer" ? " (automatic)" : ""}
+				{counts.length ? "" : " · no changes"}
+			</span>
+			{counts.length > 0 && (
+				<details>
+					<summary className="cursor-pointer">{counts.join(" · ")}</summary>
+					<ul className="mt-1 grid gap-1 break-words pl-4 text-xs">
+						{details.map(([label, items]) =>
+							items.length ? (
+								<li key={label}>
+									<span className="font-medium">{label}:</span>{" "}
+									{items.join(", ")}
+								</li>
+							) : null,
+						)}
+					</ul>
+				</details>
+			)}
+			{status.errors.length > 0 && (
+				<div
+					role="alert"
+					className="alert alert-warning alert-soft py-2 text-xs"
+				>
+					<span className="break-words">
+						{status.errors.join(" ")} The previous model list was kept.
+					</span>
+				</div>
+			)}
+		</div>
+	);
 }
 
 interface ModelDescriptor {
@@ -653,7 +738,12 @@ function ProviderCard({ initial }: { initial: ProviderForm }) {
 		Record<string, { api: string; visibility: "public" | "private" }>
 	>({});
 	const [settingsIndex, setSettingsIndex] = useState<number | null>(null);
-	useEffect(() => {
+	// The provider version this form edits; a save from an older version is
+	// refused, so a background model sync is never silently undone.
+	const [version, setVersion] = useState(initial.updatedAt ?? null);
+	const [serverChanged, setServerChanged] = useState(false);
+	const hasChangesRef = useRef(false);
+	const resetToServer = () => {
 		setEndpoints(initial.endpoints);
 		setModels(initial.enabledModels);
 		setImageModels(initial.imageModels ?? []);
@@ -664,11 +754,43 @@ function ProviderCard({ initial }: { initial: ProviderForm }) {
 				imageModels: initial.imageModels ?? [],
 			}),
 		);
-	}, [initial.endpoints, initial.enabledModels, initial.imageModels]);
+		setVersion(initial.updatedAt ?? null);
+		setServerChanged(false);
+	};
+	// biome-ignore lint/correctness/useExhaustiveDependencies: reset only when the server copy changes.
+	useEffect(() => {
+		// Unsaved edits are never wiped by a background change (model sync):
+		// say so instead, and let the admin reload.
+		if (hasChangesRef.current) {
+			setServerChanged(true);
+			return;
+		}
+		resetToServer();
+	}, [
+		initial.endpoints,
+		initial.enabledModels,
+		initial.imageModels,
+		initial.updatedAt,
+	]);
+	const invalidateProviders = () => {
+		qc.invalidateQueries({ queryKey: trpc.admin.listProviders.queryKey() });
+		qc.invalidateQueries({ queryKey: trpc.model.available.queryKey() });
+	};
+	const syncModels = useMutation(
+		trpc.admin.syncProviderModels.mutationOptions({
+			onSuccess: invalidateProviders,
+		}),
+	);
+	const setAutoSync = useMutation(
+		trpc.admin.setProviderAutoSync.mutationOptions({
+			onSuccess: invalidateProviders,
+		}),
+	);
 	const save = useMutation(
 		trpc.admin.setProvider.mutationOptions({
-			onSuccess: (_, variables) => {
+			onSuccess: (result, variables) => {
 				setApiKey("");
+				if (result?.updatedAt) setVersion(result.updatedAt);
 				setSavedConfiguration(
 					JSON.stringify({
 						endpoints: variables.endpoints,
@@ -768,11 +890,74 @@ function ProviderCard({ initial }: { initial: ProviderForm }) {
 	const hasChanges =
 		apiKey.length > 0 ||
 		JSON.stringify({ endpoints, models, imageModels }) !== savedConfiguration;
+	hasChangesRef.current = hasChanges;
+	const syncAvailable = initial.syncAvailable ?? false;
+	const syncing =
+		syncModels.isPending || setAutoSync.isPending || initial.syncing;
+	const conflict = save.error?.data?.code === "CONFLICT";
 
 	return (
 		<section className="card card-border bg-base-100 shadow-sm">
 			<div className="card-body gap-4 p-4 sm:p-5">
 				<h3 className="card-title capitalize">{initial.provider}</h3>
+				<div className="flex min-w-0 flex-wrap items-start gap-x-4 gap-y-2">
+					<label className="label cursor-pointer gap-2 text-sm">
+						<input
+							type="checkbox"
+							className="toggle toggle-sm"
+							checked={initial.autoSyncModels ?? false}
+							disabled={!syncAvailable || setAutoSync.isPending}
+							onChange={(event) =>
+								setAutoSync.mutate({
+									provider: initial.provider,
+									enabled: event.target.checked,
+								})
+							}
+						/>
+						Auto-sync models
+					</label>
+					<button
+						type="button"
+						className="btn btn-sm"
+						disabled={
+							!syncAvailable || hasChanges || syncing || endpoints.length === 0
+						}
+						title={
+							!syncAvailable
+								? "Model sync is off in airgap mode"
+								: hasChanges
+									? "Save or discard your changes first"
+									: "Add new gateway models (as private), refresh what the gateway reports, and remove models it no longer lists"
+						}
+						onClick={() => syncModels.mutate({ provider: initial.provider })}
+					>
+						{syncing ? "Syncing…" : "Sync models"}
+					</button>
+					<div className="min-w-0 basis-full sm:basis-auto sm:flex-1">
+						<ModelSyncStatusLine status={initial.modelSync ?? null} />
+					</div>
+				</div>
+				{serverChanged && (
+					<div
+						role="alert"
+						className="alert alert-info alert-soft py-2 text-sm"
+					>
+						<span>
+							This provider changed on the server (a model sync or another
+							admin) while you were editing.
+						</span>
+						<button
+							type="button"
+							className="btn btn-xs"
+							onClick={() => {
+								save.reset();
+								resetToServer();
+							}}
+						>
+							Reload
+						</button>
+					</div>
+				)}
 				<fieldset className="fieldset grid min-w-0 content-start gap-1">
 					<legend className="fieldset-legend">API key</legend>
 					<input
@@ -1132,7 +1317,9 @@ function ProviderCard({ initial }: { initial: ProviderForm }) {
 					{(save.isError ||
 						remove.isError ||
 						queryModels.isError ||
-						importModels.isError) && (
+						importModels.isError ||
+						syncModels.isError ||
+						setAutoSync.isError) && (
 						<div
 							role="alert"
 							className="alert alert-error alert-soft py-2 text-sm"
@@ -1140,7 +1327,21 @@ function ProviderCard({ initial }: { initial: ProviderForm }) {
 							{save.error?.message ??
 								remove.error?.message ??
 								queryModels.error?.message ??
-								importModels.error?.message}
+								importModels.error?.message ??
+								syncModels.error?.message ??
+								setAutoSync.error?.message}
+							{conflict && (
+								<button
+									type="button"
+									className="btn btn-xs"
+									onClick={() => {
+										save.reset();
+										resetToServer();
+									}}
+								>
+									Reload
+								</button>
+							)}
 						</div>
 					)}
 					{!hasChanges && save.isSuccess && (
@@ -1171,6 +1372,7 @@ function ProviderCard({ initial }: { initial: ProviderForm }) {
 								endpoints,
 								enabledModels: models,
 								imageModels,
+								expectedUpdatedAt: version,
 							})
 						}
 						disabled={save.isPending || remove.isPending || !hasChanges}

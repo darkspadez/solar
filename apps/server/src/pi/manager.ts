@@ -23,6 +23,7 @@ import {
 	piCwdDir,
 	piSessionDir,
 } from "./config";
+import { piModelConfigRevision } from "./models";
 
 export interface AcquirePiSessionOptions {
 	identity: BridgeIdentity;
@@ -112,12 +113,18 @@ function scrubbedChildEnv(
 	return env;
 }
 
-/** Hash-free identity for spawn-affecting args; reused handles must match it. */
-function spawnSignature(options: AcquirePiSessionOptions): string {
+/**
+ * Identity of everything a spawned process fixes at start; reused handles must
+ * match it. Includes the model config revision because pi reads models.json
+ * only at startup: after a provider change or model sync, the next turn
+ * respawns the process (the session file on disk is the source of truth).
+ */
+export function spawnSignature(options: AcquirePiSessionOptions): string {
 	return JSON.stringify([
 		options.systemPrompt,
 		options.appendSystemPrompt ?? null,
 		options.bridgeUrl,
+		piModelConfigRevision(),
 	]);
 }
 
