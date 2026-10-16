@@ -3,6 +3,7 @@ import { Settings2, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useSession } from "../auth";
 import { useTRPC } from "../trpc";
+import { sortModelsByName } from "../chat/sortModels";
 import { newId } from "../id";
 import { copyText } from "../clipboard";
 
@@ -650,7 +651,7 @@ function TaskModel() {
 						<option value="" disabled>
 							{models.length ? "Select a task model" : "No models configured"}
 						</option>
-						{models.map((model) => (
+						{sortModelsByName(models).map((model) => (
 							<option key={modelKey(model)} value={modelKey(model)}>
 								{model.name} · {model.provider}
 							</option>
