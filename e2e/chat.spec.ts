@@ -139,8 +139,8 @@ test("shows compact provider model rows with per-model settings", async ({
 			"openai-responses",
 		);
 		await expect(
-			modelSettings.getByRole("checkbox", { name: /Admin only/ }),
-		).not.toBeChecked();
+			modelSettings.getByRole("combobox", { name: /Who can pick it/ }),
+		).toHaveValue("public");
 		await expect(
 			modelSettings.getByRole("checkbox", { name: /Documents/ }),
 		).toBeChecked();

@@ -4,7 +4,7 @@
  * I/O, so every rule is unit-tested in isolation.
  *
  * Rules:
- * - New gateway models are added as private models ("Admin only" in the UI).
+ * - New gateway models are added as private (admin-only) models.
  * - Existing models get the facts the gateway reports refreshed (reasoning,
  *   vision, service tiers, and pi routing when the gateway advertises it);
  *   what an admin set (visibility, name, context window/policy, documents,

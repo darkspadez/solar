@@ -21,6 +21,7 @@ import {
 	type ImageModelOptions,
 	type ModelContextPolicy,
 	type ModelVisibility,
+	visibleTo,
 } from "./allowlist";
 import type { NativeDocumentInput } from "./attachments";
 import { keepAdminFields } from "./modelSyncMerge";
@@ -309,7 +310,7 @@ export async function listAvailableModels(
 	const available = configs.flatMap((config) =>
 		config.enabledModels
 			.filter((entry) => !entry.image && entry.api !== "openrouter-images")
-			.filter((entry) => entry.visibility === "public" || isAdmin)
+			.filter((entry) => visibleTo(entry.visibility, isAdmin))
 			.filter((entry) =>
 				config.endpoints.some(
 					(endpoint) =>
@@ -361,7 +362,7 @@ export async function listAvailableImageModels(
 	const configs = await loadProviderConfigs();
 	const available = configs.flatMap((config) =>
 		config.imageModels.flatMap((entry) => {
-			if (entry.visibility !== "public" && !isAdmin) return [];
+			if (!visibleTo(entry.visibility, isAdmin)) return [];
 			const model = imageModelFromEntry(config.provider, entry);
 			if (
 				!model ||

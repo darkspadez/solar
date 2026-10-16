@@ -723,7 +723,7 @@ const allowlistEntrySchema = z
 		id: z.string().trim().min(1),
 		endpointId: z.string().trim().min(1),
 		api: z.string().trim().min(1),
-		visibility: z.enum(["public", "private"]).default("public"),
+		visibility: z.enum(["public", "private", "hidden"]).default("public"),
 		name: z.string().trim().optional(),
 		piProvider: z.string().trim().optional(),
 		piModel: z.string().trim().optional(),
@@ -1197,7 +1197,7 @@ const adminRouter = router({
 							api: z.enum(
 								ALL_PROVIDER_APIS as unknown as [string, ...string[]],
 							),
-							visibility: z.enum(["public", "private"]),
+							visibility: z.enum(["public", "private", "hidden"]),
 						}),
 					)
 					.min(1),

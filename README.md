@@ -252,8 +252,10 @@ surface.
 **Auto-sync models** switch. A sync reads every endpoint's `GET /v1/models`
 (endpoints sharing a URL are read once):
 
-- New gateway models are added as **Admin only** models: admins can pick them
-  straight away; switch **Admin only** off to offer one to everyone.
+- New gateway models are added as **Private** (admins only). Set a model to
+  **Public** to offer it to everyone, or to **Hidden** to offer it to nobody:
+  a hidden model stays in the list, so a sync keeps it hidden instead of
+  adding it back.
 - What the gateway reports is refreshed: reasoning, vision, service tiers and
   pi routing. What an admin set is kept: visibility, name, context window and
   policy, documents, reasoning effort and max tokens.
