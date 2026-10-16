@@ -121,6 +121,9 @@ function piVisibleTurns(conversationId: string): PiVisibleTurn[] {
 	for (const entry of path) {
 		if (entry.type !== "message") continue;
 		const role: string = entry.message.role;
+		// pi records the system prompt and tool loadout as empty-content system
+		// messages; they are model context, not part of the conversation.
+		if (role === "system") continue;
 		if (role === "user") {
 			turns.push({ id: entry.id, role: "user", entries: [entry] });
 		} else {
@@ -212,15 +215,42 @@ interface PiTurnMetricsRecord {
 function piTurnMetricsByAssistant(
 	conversationId: string,
 ): Map<string, PiTurnMetricsRecord> {
+	return customDataByAssistant<PiTurnMetricsRecord>(
+		conversationId,
+		"solar-turn-metrics",
+	);
+}
+
+// Turn errors: customType solar-turn-error, written by the engine when its
+// stall watchdog ended a turn that pi saved as "Request was aborted".
+
+interface PiTurnErrorRecord {
+	assistantEntryId: string | null;
+	errorMessage: string;
+}
+
+function piTurnErrorsByAssistant(
+	conversationId: string,
+): Map<string, PiTurnErrorRecord> {
+	return customDataByAssistant<PiTurnErrorRecord>(
+		conversationId,
+		"solar-turn-error",
+	);
+}
+
+function customDataByAssistant<T extends { assistantEntryId: string | null }>(
+	conversationId: string,
+	customType: string,
+): Map<string, T> {
 	const manager = openManager(conversationId);
-	const byAssistant = new Map<string, PiTurnMetricsRecord>();
+	const byAssistant = new Map<string, T>();
 	if (!manager) return byAssistant;
 	for (const entry of manager.getBranch()) {
 		if (
 			entry.type === "custom" &&
-			(entry as { customType?: string }).customType === "solar-turn-metrics"
+			(entry as { customType?: string }).customType === customType
 		) {
-			const data = (entry as { data?: PiTurnMetricsRecord }).data;
+			const data = (entry as { data?: T }).data;
 			if (data?.assistantEntryId) {
 				byAssistant.set(data.assistantEntryId, data);
 			}
@@ -248,6 +278,7 @@ export async function loadPiMessages(userId: string, conversationId: string) {
 	const turns = piVisibleTurns(conversationId);
 	const isLive = piGenerations.isConversationGenerating(conversationId);
 	const turnMetrics = piTurnMetricsByAssistant(conversationId);
+	const turnErrors = piTurnErrorsByAssistant(conversationId);
 
 	const toolCallsByTurn = turns.map(extractPiToolCalls);
 	const toolNames = [
@@ -265,9 +296,10 @@ export async function loadPiMessages(userId: string, conversationId: string) {
 				if (text) return text;
 				// Persisted assistant errors render as the error they failed with —
 				// otherwise a failed turn reads as an empty ghost reply on reload.
-				const errorMessage = (
-					entry.message as unknown as { errorMessage?: string }
-				).errorMessage;
+				// Solar's own reason (a stall) wins over pi's generic abort text.
+				const errorMessage =
+					turnErrors.get(entry.id)?.errorMessage ??
+					(entry.message as unknown as { errorMessage?: string }).errorMessage;
 				return errorMessage ? `**Error:** ${errorMessage}` : "";
 			})
 			.filter(Boolean);
